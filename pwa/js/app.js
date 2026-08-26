@@ -870,15 +870,23 @@ async function loadGit() {
   if (!S.pid) { toast("Open a project first", true); return; }
   try {
     G.status = await git("status");
-    $("#git-branch").textContent = G.status.branch || "(no branch)";
+    $("#git-branch").textContent = G.status.branch || (G.status.is_git ? "(empty repo)" : "not a git repo");
     renderGitFiles();
-    api(`/git/${S.pid}/graph?limit=1`)
-      .then((d) => {
-        const rem = d.remotes || [];
-        $("#git-remotes").innerHTML =
-          rem.length ? rem.map((r) => `⇅ ${esc(r.name)} → ${esc(r.fetch || "")}`).join("<br>") : "";
-      }).catch(() => {});
-  } catch (e) { toast(e.message, true); }
+    if (G.status.is_git) {
+      api(`/git/${S.pid}/graph?limit=1`)
+        .then((d) => {
+          const rem = d.remotes || [];
+          $("#git-remotes").innerHTML =
+            rem.length ? rem.map((r) => `⇅ ${esc(r.name)} → ${esc(r.fetch || "")}`).join("<br>") : "";
+        }).catch(() => {});
+    } else {
+      $("#git-remotes").innerHTML = "";
+    }
+  } catch (e) {
+    G.status = { is_git: false, staged: [], unstaged: [], untracked: [], conflicts: [] };
+    renderGitFiles();
+    toast(e.message, true);
+  }
 }
 
 function fileBadge(f) {
@@ -890,9 +898,9 @@ function fileBadge(f) {
 function allFiles() {
   const s = G.status;
   return [
-    ...s.staged.map((f) => ({ ...f, area: "staged" })),
-    ...s.unstaged.map((f) => ({ ...f, area: "unstaged" })),
-    ...s.untracked.map((f) => ({ ...f, area: "untracked" })),
+    ...(s.staged || []).map((f) => ({ ...f, area: "staged" })),
+    ...(s.unstaged || []).map((f) => ({ ...f, area: "unstaged" })),
+    ...(s.untracked || []).map((f) => ({ ...f, area: "untracked" })),
   ];
 }
 
@@ -900,6 +908,25 @@ function renderGitFiles() {
   const ul = $("#git-files");
   ul.innerHTML = "";
   const s = G.status;
+
+  if (s && s.is_git === false) {
+    ul.innerHTML = `<li style="flex-direction:column;align-items:stretch;gap:12px;text-align:center;padding:20px 14px">
+      <div style="font-weight:700;font-size:15px">📁 Not a Git repository</div>
+      <div style="color:var(--muted);font-size:13px">This project folder does not have Git initialized yet.</div>
+      <button id="btn-init-git-now" class="primary full" style="margin-top:6px">Initialize Git Repository (git init)</button>
+    </li>`;
+    const b = $("#btn-init-git-now");
+    if (b) {
+      b.onclick = async () => {
+        try {
+          await api(`/git/${S.pid}/init`, { method: "POST" });
+          toast("Git repository initialized ✓");
+          loadGit();
+        } catch (err) { toast(err.message, true); }
+      };
+    }
+    return;
+  }
 
   // Render Conflicts if any
   const confWrap = $("#git-conflicts-wrap");

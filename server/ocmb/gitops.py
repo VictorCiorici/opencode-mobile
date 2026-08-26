@@ -29,8 +29,41 @@ def _safe_path(root: str, rel: str) -> str:
     return full
 
 
+async def init_repo(path: str, branch: str = "main") -> str:
+    cmd = ["init"]
+    if branch:
+        cmd += ["--initial-branch", branch]
+    out = await _run(path, *cmd)
+    try:
+        await _run(path, "commit", "--allow-empty", "-m", "initial commit")
+    except GitError:
+        pass
+    return out.strip() or f"initialized git repository on branch {branch}"
+
+
 async def status(path: str) -> dict:
-    porcelain = await _run(path, "status", "--porcelain=v1", "-b")
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return {
+            "is_git": False,
+            "branch": "",
+            "staged": [],
+            "unstaged": [],
+            "untracked": [],
+            "conflicts": [],
+            "has_conflicts": false if False else False,
+        }
+    try:
+        porcelain = await _run(path, "status", "--porcelain=v1", "-b")
+    except GitError:
+        return {
+            "is_git": False,
+            "branch": "",
+            "staged": [],
+            "unstaged": [],
+            "untracked": [],
+            "conflicts": [],
+            "has_conflicts": False,
+        }
     staged, unstaged, untracked, conflicts = [], [], [], []
     for line in porcelain.splitlines():
         if not line.strip() or line.startswith("#"):
@@ -47,6 +80,7 @@ async def status(path: str) -> dict:
             unstaged.append(entry)
     branch = porcelain.splitlines()[0][2:] if porcelain else ""
     return {
+        "is_git": True,
         "branch": branch,
         "staged": staged,
         "unstaged": unstaged,

@@ -242,6 +242,18 @@ def _proj_or_404(pid: str) -> str:
     return p["path"]
 
 
+class InitIn(BaseModel):
+    branch: str = "main"
+
+
+@app.post("/git/{pid}/init")
+async def git_init(pid: str, body: InitIn | None = None, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.init_repo(_proj_or_404(pid), body.branch if body else "main")}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/git/{pid}/status")
 async def git_status(pid: str, _: None = Depends(auth)):
     try:
