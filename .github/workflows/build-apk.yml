@@ -20,17 +20,15 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Generate Gradle wrapper
-        uses: gradle/gradle-build-action@v3
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
         with:
-          build-root-directory: android
-          arguments: wrapper
+          gradle-version: "8.5"
 
       - name: Build debug APK
-        uses: gradle/gradle-build-action@v3
-        with:
-          build-root-directory: android
-          arguments: assembleDebug
+        run: |
+          cd android
+          gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
