@@ -44,7 +44,7 @@ def _slug(name: str) -> str:
     return s or "project"
 
 
-def create_project(name: str, git_init: bool = True) -> dict:
+def create_project(name: str, git_init: bool = True, branch: str = "main") -> dict:
     slug = _slug(name)
     with _lock:
         reg = _load()
@@ -56,7 +56,10 @@ def create_project(name: str, git_init: bool = True) -> dict:
         path = os.path.join(str(WORKSPACE_DIR), pid)
         os.makedirs(path, exist_ok=True)
         if git_init and not os.path.isdir(os.path.join(path, ".git")):
-            subprocess.run(["git", "init"], cwd=path, check=False, capture_output=True)
+            init = ["git", "init"]
+            if branch:
+                init += ["--initial-branch", branch]
+            subprocess.run(init, cwd=path, check=False, capture_output=True)
             subprocess.run(
                 ["git", "commit", "--allow-empty", "-m", "initial commit"],
                 cwd=path, check=False, capture_output=True,

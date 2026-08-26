@@ -140,9 +140,11 @@ $("#project-select").addEventListener("change", async (e) => {
 $("#btn-create-project").addEventListener("click", async () => {
   const name = $("#new-project-name").value.trim();
   if (!name) return toast("Enter a project name", true);
+  const branch = $("#new-project-branch").value.trim() || "main";
   try {
-    const p = await api("/api/projects", { method: "POST", body: { name } });
+    const p = await api("/api/projects", { method: "POST", body: { name, branch } });
     $("#new-project-name").value = "";
+    $("#new-project-branch").value = "";
     await loadProjects(false);
     S.pid = p.id;
     localStorage.setItem("of.pid", p.id);
@@ -408,8 +410,8 @@ async function sendPrompt(text, retryOf = false) {
   S.lastSent = text;
 
   pushMsg("user", esc(text));
-  const wait = pushMsg("assistant thinking", "opencode is thinking… <span class=\"elapsed\"></span>");
-  const elapsedEl = wait.querySelector(".elapsed");
+  const live = pushMsg("assistant thinking", "opencode is thinking… <span class=\"elapsed\"></span>");
+  const elapsedEl = live.querySelector(".elapsed");
   const t0 = Date.now();
 
   const body = { parts: [{ type: "text", text }] };
@@ -419,58 +421,59 @@ async function sendPrompt(text, retryOf = false) {
     S.busy = true;
     S.abortReq = false;
     updateSendBtn();
-    // remember the newest message before sending so we can detect a NEW reply
     const base = await oc(`/session/${S.sid}/message?limit=1`);
     const baseId = base[0]?.info?.id;
     await oc(`/session/${S.sid}/prompt_async`, { method: "POST", body });
 
-    let warned = false;
+    const paint = (m) => {
+      const html = (m.parts || []).map(partHtml).join("");
+      live.className = "msg assistant";
+      live.innerHTML = `<span class="role">assistant</span>${html || "<span class='thinking'>…</span>"}`;
+      if (m.info?.tokens) {
+        const t = m.info.tokens;
+        const ctx = (t.input || 0) + (t.cache?.read || 0) + (t.cache?.write || 0);
+        live.insertAdjacentHTML("beforeend",
+          `<div class="msg-meta">CTX ${fmtTok(ctx)} · out ${fmtTok(t.output)} · ` +
+          `${esc(m.info.modelID || "")}` +
+          (m.info.cost ? ` · $${m.info.cost.toFixed(3)}` : "") + `</div>`);
+      }
+      updateCtxBar([m]);
+      chatScroll().scrollTop = chatScroll().scrollHeight;
+    };
+
+    let warned = false, painted = false;
     for (;;) {
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 800));
       elapsedEl.textContent = `(${Math.round((Date.now() - t0) / 1000)}s)`;
       let last = null;
-      try {
-        const msgs = await oc(`/session/${S.sid}/message?limit=1`);
-        last = msgs[0];
-        if (last?.info?.role === "assistant") {
-          updateCtxBar(msgs);
-          const r = (last.parts || []).filter((p) => p.type === "reasoning" && p.text).pop();
-          if (r && !(last.info?.time?.completed)) {
-            wait.classList.remove("thinking");
-            const tail = r.text.length > 300 ? "…" + r.text.slice(-299) : r.text;
-            wait.innerHTML = `<span class="role">💭 reasoning…</span>${esc(tail)}
-              <span class="elapsed">(${Math.round((Date.now() - t0) / 1000)}s)</span>`;
-          }
-        }
-      } catch {}
-
+      try { last = (await oc(`/session/${S.sid}/message?limit=1`))[0]; } catch {}
       const isNew = last && baseId && last.info?.id !== baseId;
+
+      if (isNew && last.info?.role === "assistant") {
+        paint(last); painted = true;
+      }
       const done = isNew && last.info?.role === "assistant" &&
         (last.info?.time?.completed || last.info?.error);
       if (done) break;
 
-      /* stall detection: no new assistant message at all */
       const waited = Date.now() - t0;
       if (!isNew && waited > 20000 && !warned) {
         warned = true;
-        wait.innerHTML = `Still waiting for opencode… <span class="elapsed"></span>`;
+        live.innerHTML = `Still waiting for opencode… <span class="elapsed"></span>`;
       }
       if (!isNew && waited > 90000) {
-        wait.classList.remove("thinking");
-        wait.innerHTML = `<span class="role">no response</span>The model never replied.`;
+        live.className = "msg assistant";
+        live.innerHTML = `<span class="role">no response</span>The model never replied.`;
         const btn = document.createElement("button");
-        btn.className = "ghost";
-        btn.style.marginTop = "8px";
+        btn.className = "ghost"; btn.style.marginTop = "8px";
         btn.textContent = retryOf ? "↻ Try again" : "↻ Retry";
-        btn.onclick = () => { wait.remove(); sendPrompt(text, true); };
-        wait.appendChild(btn);
+        btn.onclick = () => { live.remove(); sendPrompt(text, true); };
+        live.appendChild(btn);
         break;
       }
-      if (S.abortReq) {
-        await new Promise((r) => setTimeout(r, 1500));
-        break;
-      }
+      if (S.abortReq) { await new Promise((r) => setTimeout(r, 1500)); break; }
     }
+    if (painted) updateCtxBar(await oc(`/session/${S.sid}/message?limit=1`).catch(() => []));
     await renderChat(true);
   } catch (err) {
     wait.remove();
@@ -1153,6 +1156,15 @@ $("#editor-save").onclick = async () => {
   });
   FACTIVE.dirty = false; renderTabs(); toast("Saved");
 };
+$("#editor-lsp").addEventListener("click", async () => {
+  try {
+    const status = await oc("/lsp");
+    const list = status.filter((x) => x.status).map((x) =>
+      `${x.name}: ${x.status}${x.progress ? " (" + x.progress + ")" : ""}`);
+    toast(list.length ? list.join("\n") : "No LSP servers running");
+  } catch (e) { toast(e.message, true); }
+});
+
 $("#editor-close").addEventListener("click", () => {
   if (FACTIVE) {
     FTABS.splice(FTABS.indexOf(FACTIVE), 1);
@@ -1160,6 +1172,29 @@ $("#editor-close").addEventListener("click", () => {
   }
   if (FACTIVE) showTab(FACTIVE); else $("#editor-wrap").classList.add("hidden");
   renderTabs();
+});
+
+/* project-wide text search via opencode /find */
+let searchTimer = null;
+$("#proj-search").addEventListener("input", (e) => {
+  clearTimeout(searchTimer);
+  const q = e.target.value.trim();
+  if (q.length < 2) { $("#proj-search-results").classList.add("hidden"); return; }
+  searchTimer = setTimeout(async () => {
+    try {
+      const res = await oc(`/find?pattern=${encodeURIComponent(q)}`);
+      const ul = $("#proj-search-results");
+      ul.classList.remove("hidden");
+      ul.innerHTML = res.length ? "" : `<li style="color:var(--muted)">No matches</li>`;
+      for (const m of res.slice(0, 30)) {
+        const line = (m.lines || "").trim().slice(0, 80);
+        ul.insertAdjacentHTML("beforeend",
+          `<li class="file-entry"><div><strong>${esc(m.path)}</strong>
+             <small style="display:block;color:var(--muted)">:${m.line_number} ${esc(line)}</small></div></li>`);
+        ul.lastChild.onclick = () => { openEditor(m.path); $("#proj-search-results").classList.add("hidden"); };
+      }
+    } catch (err) { toast(err.message, true); }
+  }, 400);
 });
 
 /* in-file search: highlight occurrences in the open editor */

@@ -42,6 +42,7 @@
       <input id="new-project-name" placeholder="New project name…">
       <button id="btn-create-project" class="primary">Create</button>
     </div>
+    <input id="new-project-branch" placeholder="Branch (default: main)" style="margin-bottom:12px">
     <button id="btn-import-project" class="ghost full import-btn">📂 Import existing folder…</button>
     <ul id="project-list" class="list"></ul>
   </section>
@@ -118,12 +119,18 @@
 
   <!-- FILES -->
   <section id="view-files" class="view">
-    <div class="crumbs card"><button id="files-up" class="ghost">↑ Up</button><span id="files-path">/</span>
-      <input id="file-search" placeholder="🔍 find in current file…" style="flex:1"></div>
+    <div class="crumbs card"><button id="files-up" class="ghost">↑ Up</button><span id="files-path">/</span></div>
+    <div class="card-row">
+      <input id="file-search" placeholder="🔍 find in current file…">
+      <input id="proj-search" placeholder="🔍 search all files…">
+    </div>
+    <ul id="proj-search-results" class="list hidden"></ul>
     <ul id="file-list" class="list"></ul>
     <div id="editor-wrap" class="hidden">
       <div id="file-tabs" class="file-tabs"></div>
-      <div class="card-row"><strong id="editor-name"></strong><button id="editor-close" class="ghost">Close</button></div>
+      <div class="card-row"><strong id="editor-name"></strong>
+        <button id="editor-lsp" class="ghost">LSP</button>
+        <button id="editor-close" class="ghost">Close</button></div>
       <textarea id="editor" spellcheck="false"></textarea>
       <button id="editor-save" class="primary full">Save file</button>
     </div>

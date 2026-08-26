@@ -77,6 +77,14 @@ async def stage(path: str, files: list[str] | None) -> None:
 
 async def unstage(path: str, files: list[str] | None) -> None:
     if files:
+        rels = [_safe_path(path, f).removeprefix(os.path.abspath(path)).lstrip("/") for f in files]
+        await _run(path, "reset", "--", *rels)
+    else:
+        await _run(path, "reset")
+
+
+async def unstage(path: str, files: list[str] | None) -> None:
+    if files:
         await _run(path, "reset", "--", *files)
     else:
         await _run(path, "reset")

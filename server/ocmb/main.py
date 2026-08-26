@@ -61,6 +61,7 @@ async def health(_: None = Depends(auth)):
 class ProjectIn(BaseModel):
     name: str
     git_init: bool = True
+    branch: str | None = "main"
 
 
 class ImportIn(BaseModel):
@@ -74,7 +75,7 @@ async def list_projects(_: None = Depends(auth)):
 
 @app.post("/api/projects")
 async def create_project(body: ProjectIn, _: None = Depends(auth)):
-    return proj_store.create_project(body.name, body.git_init)
+    return proj_store.create_project(body.name, body.git_init, body.branch)
 
 
 @app.delete("/api/projects/{pid}")
@@ -269,6 +270,15 @@ async def git_diff(pid: str, staged: bool = False, _: None = Depends(auth)):
 async def git_stage(pid: str, body: StageIn | None = None, _: None = Depends(auth)):
     try:
         await gitops.stage(_proj_or_404(pid), body.files if body else None)
+        return {"ok": True}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/unstage")
+async def git_unstage(pid: str, body: StageIn | None = None, _: None = Depends(auth)):
+    try:
+        await gitops.unstage(_proj_or_404(pid), body.files if body else None)
         return {"ok": True}
     except gitops.GitError as e:
         raise HTTPException(400, str(e))
