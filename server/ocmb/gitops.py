@@ -115,3 +115,122 @@ async def discard(path: str, file_rel: str) -> str:
     rel = full.removeprefix(os.path.abspath(path)).lstrip("/")
     await _run(path, "checkout", "--", rel)
     return f"discarded changes in {rel}"
+
+
+async def diff_file(path: str, file_rel: str, staged: bool = False) -> str:
+    args = ["diff", "--no-color"]
+    if staged:
+        args.append("--cached")
+    rel = _safe_path(path, file_rel).removeprefix(os.path.abspath(path)).lstrip("/")
+    args += ["--", rel]
+    try:
+        return await _run(path, *args)
+    except GitError:
+        return ""
+
+
+# ------------------------------- stashes -----------------------------------
+
+def _stash_ref(index: int) -> str:
+    if index < 0:
+        raise GitError("invalid stash index")
+    return f"stash@{{{index}}}"
+
+
+async def stash_list(path: str) -> list[dict]:
+    out = await _run(path, "stash", "list")
+    stashes = []
+    for i, line in enumerate(out.splitlines()):
+        if not line.strip():
+            continue
+        # "stash@{0}: WIP on main: abc1234 message"
+        rest = line.split(":", 1)[1].strip() if ":" in line else line
+        stashes.append({"index": i, "label": rest})
+    return stashes
+
+
+async def stash_push(path: str, message: str | None = None) -> str:
+    args = ["stash", "push"]
+    if message:
+        args += ["-m", message]
+    out = await _run(path, *args)
+    return out.strip() or "stashed"
+
+
+async def stash_apply(path: str, index: int, pop: bool = False) -> str:
+    ref = _stash_ref(index)
+    cmd = "pop" if pop else "apply"
+    out = await _run(path, "stash", cmd, ref)
+    return out.strip() or f"{cmd}ed {ref}"
+
+
+async def stash_drop(path: str, index: int) -> str:
+    ref = _stash_ref(index)
+    out = await _run(path, "stash", "drop", ref)
+    return out.strip() or f"dropped {ref}"
+
+
+# ------------------------------- branches ----------------------------------
+
+async def branch_delete(path: str, name: str, force: bool = False) -> str:
+    flag = "-D" if force else "-d"
+    return (await _run(path, "branch", flag, name)).strip() or f"deleted {name}"
+
+
+async def branch_rename(path: str, old: str, new: str) -> str:
+    return (await _run(path, "branch", "-m", old, new)).strip() or f"{old} → {new}"
+
+
+async def merge(path: str, ref: str) -> str:
+    return (await _run(path, "merge", "--no-edit", ref)).strip() or f"merged {ref}"
+
+
+async def graph(path: str, limit: int = 60) -> list[dict]:
+    """Structured commit list (all branches, date order) for graph rendering."""
+    fmt = "%H%x1f%P%x1f%h%x1f%d%x1f%s%x1f%an%x1f%ad"
+    try:
+        out = await _run(
+            path, "log", "--all", "--date-order",
+            f"--pretty=format:{fmt}", "--date=short", f"-{limit}",
+        )
+    except GitError:
+        return []
+    commits = []
+    for line in out.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) < 7:
+            continue
+        refs = [r.strip().strip("()") .replace("HEAD -> ", "")
+                for r in parts[3].split(",")] if parts[3].strip() else []
+        commits.append({
+            "hash": parts[0],
+            "short": parts[2],
+            "parents": parts[1].split() if parts[1].strip() else [],
+            "refs": [r for r in refs if r],
+            "subject": parts[4],
+            "author": parts[5],
+            "date": parts[6],
+        })
+    return commits
+
+
+async def branch_create(path: str, name: str) -> str:
+    return (await _run(path, "branch", name)).strip() or f"created {name}"
+
+
+async def revert_commit(path: str, ref: str) -> str:
+    return (await _run(path, "revert", "--no-edit", ref)).strip() or f"reverted {ref[:8]}"
+
+
+async def remotes(path: str) -> list[dict]:
+    out = await _run(path, "remote", "-v")
+    seen: dict[str, dict] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            r = seen.setdefault(parts[0], {"name": parts[0], "fetch": None, "push": None})
+            if "(fetch)" in line:
+                r["fetch"] = parts[1]
+            elif "(push)" in line:
+                r["push"] = parts[1]
+    return list(seen.values())

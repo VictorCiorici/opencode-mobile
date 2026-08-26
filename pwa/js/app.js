@@ -44,11 +44,56 @@ function esc(s) {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
-/* tiny markdown: fenced code, inline code, bold */
+/* ---------------- syntax highlighting ---------------- */
+
+const KW = {
+  js: "const|let|var|function|return|if|else|for|while|class|new|import|from|export|default|async|await|try|catch|finally|throw|typeof|instanceof|switch|case|break|continue|null|undefined|true|false|this|extends|super",
+  ts: "const|let|var|function|return|if|else|for|while|class|new|import|from|export|default|async|await|interface|type|enum|implements|public|private|readonly|try|catch|throw|null|undefined|true|false|this|string|number|boolean|any",
+  py: "def|return|if|elif|else|for|while|import|from|as|class|try|except|raise|with|lambda|None|True|False|and|or|not|in|is|pass|yield|async|await|global|assert|del|self",
+  sh: "echo|cd|ls|cat|grep|sed|awk|curl|wget|git|sudo|apt|pip|npm|export|source|if|then|fi|for|do|done|while|case|esac|function|return|local|set",
+  sql: "SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|DROP|ALTER|JOIN|LEFT|RIGHT|INNER|ON|GROUP|ORDER|BY|LIMIT|AND|OR|NOT|NULL|AS|DISTINCT",
+  go: "func|package|import|var|const|type|struct|interface|go|defer|chan|select|range|map|nil|true|false|if|else|for|return|switch|case|break",
+  rust: "fn|let|mut|const|struct|enum|impl|trait|pub|use|mod|match|if|else|loop|while|for|in|return|Some|None|Ok|Err|self|Self|where|dyn|move",
+};
+
+function langKey(lang) {
+  const l = (lang || "").toLowerCase();
+  if (["py", "python"].includes(l)) return "py";
+  if (["js", "javascript", "jsx", "mjs", "node"].includes(l)) return "js";
+  if (["ts", "typescript", "tsx"].includes(l)) return "ts";
+  if (["sh", "bash", "shell", "zsh", "console", "terminal"].includes(l)) return "sh";
+  if (l === "sql") return "sql";
+  if (l === "go") return "go";
+  if (l === "rust" || l === "rs") return "rust";
+  return null;
+}
+
+function hl(src, lang) {
+  const key = langKey(lang);
+  const kwSet = new Set(key ? KW[key].split("|") : []);
+  const re =
+    /(\/\/[^\n]*|#[^\n]*|--[^\n]*)|(\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_]\w*)|([\s\S])/g;
+  let out = "", m;
+  while ((m = re.exec(src))) {
+    const [tok, lineC, blockC, str, num, word] = m;
+    let cls = "";
+    if (lineC) {
+      if (tok.startsWith("#") && !["py", "sh", null, undefined].includes(key)) { out += esc(tok); continue; }
+      cls = "c";
+    }
+    else if (blockC) cls = "c";
+    else if (num) cls = "n";
+    else if (word) cls = kwSet.has(word) || (key === "sql" && kwSet.has(word.toUpperCase())) ? "k" : "";
+    out += cls ? `<span class="tk-${cls}">${esc(tok)}</span>` : esc(tok);
+  }
+  return out;
+}
+
+/* markdown: fenced code w/ highlighting, inline code, bold */
 function md(text) {
   let out = esc(text || "");
-  out = out.replace(/```(\w*)\n([\s\S]*?)```/g,
-    (_, lang, code) => `<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
+  out = out.replace(/```(\w*)\n?([\s\S]*?)```/g,
+    (_, lang, code) => `<pre><code>${hl(code.replace(/\n$/, ""), lang)}</code></pre>`);
   out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
   out = out.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
   return out;
@@ -65,17 +110,6 @@ $$("#bottom-nav button").forEach((b) =>
     if (b.dataset.view === "git") loadGit();
     if (b.dataset.view === "models") loadModels();
     if (b.dataset.view === "files") loadFiles(S.filesPath);
-  })
-);
-
-$$(".subtab").forEach((b) =>
-  b.addEventListener("click", () => {
-    $$(".subtab").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active");
-    $$(".subtab-page").forEach((x) => x.classList.remove("active"));
-    $(`#git-${b.dataset.subtab}`).classList.add("active");
-    if (b.dataset.subtab === "log") loadGitLog();
-    if (b.dataset.subtab === "diff") loadGitDiff();
   })
 );
 
@@ -190,7 +224,7 @@ $("#btn-sessions").addEventListener("click", async () => {
 
 function updateChatHeader() {
   const m = S.model;
-  $("#btn-model-pick").textContent = m ? `Model: ${m.providerID}/${m.modelID}` : "Model: default";
+  $("#model-label").textContent = m ? `${m.providerID}/${m.modelID}` : "default";
 }
 
 const chatScroll = () => $("#chat-scroll");
@@ -205,6 +239,41 @@ function pushMsg(cls, html, id) {
   return el;
 }
 
+function partHtml(p) {  if (p.type === "text" && (p.text || "").trim())
+    return md(p.text);
+  if (p.type === "reasoning") {
+    const t = p.text || "";
+    if (!t.trim()) return "";
+    const open = localStorage.getItem("of.set.reasoning") === "1" ? " open" : "";
+    return `<details class="reasoning"${open}><summary>💭 Reasoning</summary>${esc(t)}</details>`;
+  }
+  if (p.type === "tool" && p.state?.title)
+    return `<div class="msg-line tool-line">🔧 ${esc(p.state.title)}</div>`;
+  return "";
+}
+
+function fmtTok(n) {
+  if (n == null) return "–";
+  if (n >= 1_000_000) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
+}
+
+/* context usage from the newest assistant message */
+function updateCtxBar(msgs) {
+  const el = $("#ctx-inline");
+  if (!$("#set-live-ctx")?.checked) { el.textContent = ""; return; }
+  const lastA = [...(msgs || [])].reverse().find((m) => m.info?.role === "assistant");
+  const t = lastA?.info?.tokens;
+  if (!t) { el.textContent = ""; return; }
+  const ctx = (t.input || 0) + (t.cache?.read || 0) + (t.cache?.write || 0);
+  const window_ = S.model && /gemini|1m/i.test(S.model.modelID) ? 1000000 : 128000;
+  const pct = Math.min(100, Math.round((ctx / window_) * 100));
+  const cost = lastA.info.cost ? ` · $${lastA.info.cost.toFixed(3)}` : "";
+  el.innerHTML =
+    `<span class="${pct > 75 ? "warn" : ""}">${fmtTok(ctx)} ${pct}%</span>${cost} · `;
+}
+
 async function renderChat(full = false) {
   if (full) $("#chat-messages").innerHTML = "";
   if (!S.pid || !S.sid) {
@@ -214,20 +283,35 @@ async function renderChat(full = false) {
   try {
     const msgs = await oc(`/session/${S.sid}/message?limit=50`);
     if (full) {
+      // oldest first so new messages appear at the bottom
+      msgs.sort((a, b) =>
+        (a.info?.time?.created || 0) - (b.info?.time?.created || 0));
       $("#chat-messages").innerHTML = "";
-      for (const m of msgs.reverse()) {
+      for (const m of msgs) {
         const role = m.info?.role || "system";
         if (m.info?.error && m.info.error.name !== "MessageOutputLengthError") {
           const d = m.info.error.data || {};
           pushMsg("system", `<span class="role">error</span>${esc(d.message || m.info.error.name)}`);
           continue;
         }
-        const text = (m.parts || []).map((p) => p.text || "").filter(Boolean).join("\n");
-        if (text.trim())
-          pushMsg(role === "user" ? "user" : "assistant",
-            `<span class="role">${role}</span>${md(text)}`, m.info?.id);
+        const html = (m.parts || []).map(partHtml).join("");
+        if (!html.trim() && !m.info?.tokens) {
+          pushMsg("system", "(empty response — the model returned no content)");
+          continue;
+        }
+        const el = pushMsg(role === "user" ? "user" : "assistant",
+          html || `<span style="color:var(--muted)">(empty response)</span>`, m.info?.id);
+        if (role === "assistant" && m.info?.tokens) {
+          const t = m.info.tokens;
+          const ctx = (t.input || 0) + (t.cache?.read || 0) + (t.cache?.write || 0);
+          el.insertAdjacentHTML("beforeend",
+            `<div class="msg-meta">CTX ${fmtTok(ctx)} · out ${fmtTok(t.output)} · ` +
+            `${esc(m.info.modelID || "")}` +
+            (m.info.cost ? ` · $${m.info.cost.toFixed(3)}` : "") + `</div>`);
+        }
       }
     }
+    updateCtxBar(msgs);
     setConn(true);
   } catch (e) { setConn(false); }
 }
@@ -236,42 +320,153 @@ $("#chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#chat-form").requestSubmit(); }
 });
 
-$("#chat-form").addEventListener("submit", async (e) => {
+$("#chat-form").addEventListener("submit", (e) => {
   e.preventDefault();
+  if (S.busy) return stopGeneration();
   const input = $("#chat-input");
   const text = input.value.trim();
-  if (!text || S.busy) return;
+  if (!text) return;
   if (!S.pid || !S.sid) { toast("Open a project first", true); return; }
   input.value = "";
+  sendPrompt(text);
+});
 
-  pushMsg("user", `<span class="role">you</span>${esc(text)}`);
-  const wait = pushMsg("assistant thinking", "opencode is working…");
+async function sendPrompt(text, retryOf = false) {
+  if (S.busy || !S.pid || !S.sid) return;
+  S.lastSent = text;
+
+  pushMsg("user", esc(text));
+  const wait = pushMsg("assistant thinking", "opencode is thinking… <span class=\"elapsed\"></span>");
+  const elapsedEl = wait.querySelector(".elapsed");
+  const t0 = Date.now();
 
   const body = { parts: [{ type: "text", text }] };
   if (S.model) body.model = S.model;
 
   try {
     S.busy = true;
+    S.abortReq = false;
+    updateSendBtn();
+    // remember the newest message before sending so we can detect a NEW reply
+    const base = await oc(`/session/${S.sid}/message?limit=1`);
+    const baseId = base[0]?.info?.id;
     await oc(`/session/${S.sid}/prompt_async`, { method: "POST", body });
-    // poll until the session goes idle again
+
+    let warned = false;
     for (;;) {
       await new Promise((r) => setTimeout(r, 1500));
-      const statuses = await oc("/session/status");
-      const st = statuses[S.sid];
-      if (!st || st.type === "idle") break;
-      wait.textContent = "opencode is working… (" + (st.type || "busy") + ")";
+      elapsedEl.textContent = `(${Math.round((Date.now() - t0) / 1000)}s)`;
+      let last = null;
+      try {
+        const msgs = await oc(`/session/${S.sid}/message?limit=1`);
+        last = msgs[0];
+        if (last?.info?.role === "assistant") {
+          updateCtxBar(msgs);
+          const r = (last.parts || []).filter((p) => p.type === "reasoning" && p.text).pop();
+          if (r && !(last.info?.time?.completed)) {
+            wait.classList.remove("thinking");
+            const tail = r.text.length > 300 ? "…" + r.text.slice(-299) : r.text;
+            wait.innerHTML = `<span class="role">💭 reasoning…</span>${esc(tail)}
+              <span class="elapsed">(${Math.round((Date.now() - t0) / 1000)}s)</span>`;
+          }
+        }
+      } catch {}
+
+      const isNew = last && baseId && last.info?.id !== baseId;
+      const done = isNew && last.info?.role === "assistant" &&
+        (last.info?.time?.completed || last.info?.error);
+      if (done) break;
+
+      /* stall detection: no new assistant message at all */
+      const waited = Date.now() - t0;
+      if (!isNew && waited > 20000 && !warned) {
+        warned = true;
+        wait.innerHTML = `Still waiting for opencode… <span class="elapsed"></span>`;
+      }
+      if (!isNew && waited > 90000) {
+        wait.classList.remove("thinking");
+        wait.innerHTML = `<span class="role">no response</span>The model never replied.`;
+        const btn = document.createElement("button");
+        btn.className = "ghost";
+        btn.style.marginTop = "8px";
+        btn.textContent = retryOf ? "↻ Try again" : "↻ Retry";
+        btn.onclick = () => { wait.remove(); sendPrompt(text, true); };
+        wait.appendChild(btn);
+        break;
+      }
+      if (S.abortReq) {
+        await new Promise((r) => setTimeout(r, 1500));
+        break;
+      }
     }
     await renderChat(true);
   } catch (err) {
     wait.remove();
     toast(err.message, true);
-  } finally { S.busy = false; }
-});
+  } finally {
+    S.busy = false;
+    updateSendBtn();
+    chatScroll().scrollTop = chatScroll().scrollHeight;
+  }
+}
 
-/* model quick-pick: jump to models tab */
-$("#btn-model-pick").addEventListener("click", () =>
+function updateSendBtn() {
+  const b = $("#chat-send");
+  b.textContent = S.busy ? "⏹" : "➤";
+  b.classList.toggle("stop", S.busy);
+}
+
+async function stopGeneration() {
+  S.abortReq = true;
+  try {
+    await oc(`/session/${S.sid}/abort`, { method: "POST" });
+    toast("Generation stopped");
+  } catch (e) { toast(e.message, true); }
+}
+
+/* model quick-pick: tap the model label to jump to models tab */
+$(".sb-right").addEventListener("click", () =>
   $$('#bottom-nav button[data-view="models"]')[0].click()
 );
+
+/* ---------------- settings ---------------- */
+
+function applySettings() {
+  document.body.classList.toggle("hide-meta",
+    localStorage.getItem("of.set.meta") !== "1");
+}
+
+function initSettings() {
+  const map = [
+    ["#set-reasoning", "of.set.reasoning"],
+    ["#set-meta", "of.set.meta"],
+    ["#set-live-ctx", "of.set.live"],
+  ];
+  for (const [sel, key] of map) {
+    const el = $(sel);
+    el.checked = (key === "of.set.live" ? localStorage.getItem(key) !== "0"
+      : localStorage.getItem(key) === "1");
+    el.addEventListener("change", () => {
+      localStorage.setItem(key, el.checked ? "1" : "0");
+      applySettings();
+      if (key === "of.set.reasoning") renderChat(true).catch(() => {});
+      if (key === "of.set.live" && !el.checked) $("#ctx-inline").textContent = "";
+    });
+  }
+  $("#btn-clear-prefs").addEventListener("click", () => {
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith("of."))
+      .forEach((k) => localStorage.removeItem(k));
+    toast("Preferences cleared — reloading");
+    setTimeout(() => location.reload(), 800);
+  });
+  api("/api/health").then((h) => {
+    $("#about-box").innerHTML =
+      `OpenForge v0.1 · bridge <b>${h.bridge}</b><br>` +
+      `opencode ${esc(h.opencode?.version || "?")} — ` +
+      `${h.opencode?.healthy ? "healthy ✓" : "<span style='color:var(--err)'>offline</span>"}`;
+  }).catch(() => { $("#about-box").textContent = "Bridge unreachable"; });
+}
 
 /* ---------------- folder browser (import existing project) ---------------- */
 
@@ -333,53 +528,360 @@ $("#browser-select").addEventListener("click", async () => {
 
 /* ---------------- git ---------------- */
 
-let gitData = null;
+const G = { status: null, diffFile: null, diffStaged: false };
+
+function showActions(title, actions) {
+  $("#action-title").textContent = title;
+  const box = $("#action-buttons");
+  box.innerHTML = "";
+  for (const a of actions) {
+    const b = document.createElement("button");
+    b.className = a.danger ? "ghost danger" : (a.primary ? "primary full" : "ghost full");
+    b.style.marginBottom = "8px";
+    b.textContent = a.label;
+    b.onclick = () => { $("#action-overlay").classList.add("hidden"); a.fn(); };
+    box.appendChild(b);
+  }
+  $("#action-overlay").classList.remove("hidden");
+}
 
 async function loadGit() {
   if (!S.pid) { toast("Open a project first", true); return; }
   try {
-    gitData = await git("status");
-    $("#git-branch").textContent = gitData.branch || "(no branch)";
+    G.status = await git("status");
+    $("#git-branch").textContent = G.status.branch || "(no branch)";
     renderGitFiles();
+    api(`/git/${S.pid}/graph?limit=1`)
+      .then((d) => {
+        const rem = d.remotes || [];
+        $("#git-remotes").innerHTML =
+          rem.length ? rem.map((r) => `⇅ ${esc(r.name)} → ${esc(r.fetch || "")}`).join("<br>") : "";
+      }).catch(() => {});
   } catch (e) { toast(e.message, true); }
+}
+
+function fileBadge(f) {
+  if (f.x === "?" ) return `<span class="st-badge st-question">new</span>`;
+  const c = f.x !== " " ? f.x : f.y;
+  return `<span class="st-badge st-${esc(c)}">${esc(c)}</span>`;
+}
+
+function allFiles() {
+  const s = G.status;
+  return [
+    ...s.staged.map((f) => ({ ...f, area: "staged" })),
+    ...s.unstaged.map((f) => ({ ...f, area: "unstaged" })),
+    ...s.untracked.map((f) => ({ ...f, area: "untracked" })),
+  ];
 }
 
 function renderGitFiles() {
   const ul = $("#git-files");
   ul.innerHTML = "";
-  const rows = [
-    ...gitData.staged.map((f) => ({ f, cls: "add", tag: "staged" })),
-    ...gitData.unstaged.map((f) => ({ f, cls: "mod", tag: "modified" })),
-    ...gitData.untracked.map((f) => ({ f, cls: "add", tag: "untracked" })),
-  ];
-  if (!rows.length) ul.innerHTML = `<li>Working tree clean ✓</li>`;
-  for (const r of rows) {
+  const files = allFiles();
+  if (!files.length) { ul.innerHTML = `<li>Working tree clean ✓</li>`; return; }
+  for (const f of files) {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="git-status-${r.cls}">${esc(r.f.path)}</span>
-      <button class="ghost" style="padding:5px 10px;font-size:12px">${r.tag === "untracked" ? "discard?" : "discard"}</button>`;
-    li.querySelector("button").onclick = async () => {
-      if (!confirm(`Discard changes in ${r.f.path}?`)) return;
-      await git("discard", { method: "POST", body: { ref: r.f.path } });
-      loadGit(); toast("Changes discarded");
-    };
+    li.className = "git-file";
+    li.innerHTML = `<span style="word-break:break-all">${fileBadge(f)} ${esc(f.path)}</span>
+      <span class="muted-small">${f.area}</span>`;
+    li.onclick = () => showActions(f.path, [
+      { label: "📄 View line-by-line diff", primary: true, fn: () => openDiff(f.path, f.area === "staged") },
+      ...(f.area === "untracked" ? [] : [{ label: f.area === "staged" ? "⬆ Unstage file" : "⬇ Stage file",
+        fn: async () => {
+          await git(f.area === "staged" ? "unstage" : "stage",
+            { method: "POST", body: { files: [f.path] } });
+          loadGit(); toast(f.area === "staged" ? "Unstaged" : "Staged");
+        } }]),
+      ...(f.area === "untracked" ? [{ label: "⬇ Stage (track) file",
+        fn: async () => { await git("stage", { method: "POST", body: { files: [f.path] } }); loadGit(); } }] : []),
+      { label: "🗑 Discard changes", danger: true, fn: async () => {
+          if (!confirm(`Discard all changes in ${f.path}? This cannot be undone.`)) return;
+          try { await git("discard", { method: "POST", body: { ref: f.path } });
+                loadGit(); toast("Discarded"); }
+          catch (e) { toast(e.message, true); }
+        } },
+    ]);
     ul.appendChild(li);
   }
 }
 
-async function loadGitLog() {
-  const d = await git("log?limit=40");
-  const ul = $("#git-log-list");
-  ul.innerHTML = "";
-  for (const c of d.commits)
-    ul.insertAdjacentHTML("beforeend",
-      `<li><span class="hash">${c.hash}</span> ${esc(c.subject)}
-         <span class="meta">${esc(c.author)} · ${esc(c.date)}</span></li>`);
+$("#btn-commit").addEventListener("click", async () => {
+  const msg = $("#commit-msg").value.trim();
+  if (!msg) return toast("Enter a commit message", true);
+  try {
+    if (!G.status.staged.length &&
+        !confirm("No staged files — stage ALL changes and commit?")) return;
+    await git("commit", { method: "POST", body: { message: msg } });
+    $("#commit-msg").value = "";
+    toast("Committed ✓");
+    loadGit();
+  } catch (e) { toast(e.message, true); }
+});
+
+/* ---------- graph + branches ---------- */
+
+async function loadGitGraph() {
+  if (!S.pid) return;
+  try {
+    const d = await git("graph");
+    const chips = $("#branch-chips");
+    chips.innerHTML = "";
+    for (const name of d.branches.all) {
+      const c = document.createElement("span");
+      c.className = "chip" + (name === d.branches.current ? " cur" : "");
+      c.textContent = name;
+      c.onclick = () => branchActions(name, name === d.branches.current);
+      chips.appendChild(c);
+    }
+    $("#git-remotes").innerHTML = (d.remotes || [])
+      .map((r) => `⇅ ${esc(r.name)} → ${esc(r.fetch || "")}`).join("<br>") || "";
+    renderCommitGraph(d.commits || []);
+  } catch (e) { toast(e.message, true); }
 }
 
-async function loadGitDiff() {
-  const d = await git("diff");
-  $("#git-diff-view").textContent = d.diff || "(no unstaged diff)";
+/* ---------- rendered commit graph ---------- */
+
+const GCOLORS = ["#4f8cff", "#7c5cff", "#3ecf8e", "#ffb454", "#ff6b6b",
+  "#4dd0e1", "#f06292", "#aed581", "#ffd54f"];
+const GW = 16, GRH = 34;
+
+function renderCommitGraph(commits) {
+  const box = $("#git-graph");
+  if (!commits.length) {
+    box.innerHTML = `<div class="g-empty">No commits yet</div>`;
+    return;
+  }
+  let lanes = [];           // hash per lane index (null = free)
+  const rows = [];
+
+  for (const c of commits) {
+    let li = lanes.indexOf(c.hash);
+    if (li < 0) {
+      li = lanes.indexOf(null);
+      if (li < 0) { li = lanes.length; lanes.push(null); }
+    }
+    const before = lanes.slice();
+    lanes[li] = c.parents[0] || null;
+    for (const p of c.parents.slice(1)) {
+      const ex = lanes.indexOf(p);
+      if (ex < 0) {
+        const f = lanes.indexOf(null);
+        if (f >= 0) lanes[f] = p; else lanes.push(p);
+      }
+    }
+    rows.push({ c, li, before, after: lanes.slice() });
+  }
+
+  const maxLanes = Math.max(lanes.length + 1,
+    ...rows.map((r) => Math.max(r.li + 1, r.before.length)));
+  const width = maxLanes * GW + GW;
+
+  box.innerHTML = "";
+  for (const { c, li, before, after } of rows) {
+    const row = document.createElement("div");
+    row.className = "g-row";
+
+    const idxB = new Map(), idxA = new Map();
+    before.forEach((h, i) => h && !idxB.has(h) && idxB.set(h, i));
+    after.forEach((h, i) => h && !idxA.has(h) && idxA.set(h, i));
+    let segs = "";
+    for (const h of new Set([...idxB.keys(), ...idxA.keys()])) {
+      const i0 = idxB.get(h), i1 = idxA.get(h);
+      const col = GCOLORS[(i1 ?? i0 ?? 0) % GCOLORS.length];
+      const colIn = GCOLORS[(i0 ?? 0) % GCOLORS.length];
+      const x0 = i0 != null ? i0 * GW + GW / 2 : null;
+      const x1 = i1 != null ? i1 * GW + GW / 2 : null;
+      if (x0 == null) {
+        segs += `<line x1="${x1}" y1="0" x2="${x1}" y2="${GRH / 2}" stroke="${col}" stroke-width="2"/>`;
+      } else if (x1 == null) {
+        segs += `<line x1="${x0}" y1="${GRH / 2}" x2="${x0}" y2="${GRH}" stroke="${colIn}" stroke-width="2"/>`;
+      } else if (i0 === i1) {
+        segs += `<line x1="${x0}" y1="0" x2="${x0}" y2="${GRH}" stroke="${col}" stroke-width="2"/>`;
+      } else {
+        segs += `<path d="M ${x0} 0 C ${x0} ${GRH * 0.5}, ${x1} ${GRH * 0.5}, ${x1} ${GRH}" stroke="${colIn}" fill="none" stroke-width="2"/>`;
+      }
+    }
+    const refHtml = (c.refs || [])
+      .map((r) => `<span class="g-ref${/^[0-9a-f]{7,}$/.test(r) ? "" : " br"}">${esc(r)}</span>`).join("");
+
+    row.innerHTML =
+      `<svg class="g-svg" width="${width}" height="${GRH}">${segs}` +
+      `<circle cx="${li * GW + GW / 2}" cy="${GRH / 2}" r="4.5" fill="${GCOLORS[li % GCOLORS.length]}" stroke="#0b0e14" stroke-width="2"/></svg>` +
+      `<div class="g-info"><div class="g-subj">${refHtml}${esc(c.subject)}</div>
+         <div class="g-meta">${c.short} · ${esc(c.author)} · ${esc(c.date)}</div></div>`;
+    row.onclick = () => commitActions(c);
+    box.appendChild(row);
+  }
 }
+
+function commitActions(c) {
+  showActions(`${c.short} — ${c.subject}`, [
+    { label: "⧉ Copy full hash", fn: async () => {
+        try { await navigator.clipboard.writeText(c.hash); toast("Hash copied"); }
+        catch { toast(c.hash); }
+      } },
+    { label: "✓ Checkout this commit (detached)", primary: true, fn: async () => {
+        if (!confirm("Checkout detached HEAD at " + c.short + "?")) return;
+        try { await git("checkout", { method: "POST", body: { ref: c.hash } });
+              toast("Checked out " + c.short); loadGit(); }
+        catch (e) { toast(e.message, true); }
+      } },
+    { label: "⑂ Create branch here", fn: () => {
+        const name = prompt("Branch name:");
+        if (!name) return;
+        git("branch/create", { method: "POST", body: { name } })
+          .then(() => { toast(`Branch "${name}" created`); loadGitGraph(); })
+          .catch((e) => toast(e.message, true));
+      } },
+    { label: "↩ Revert this commit", danger: true, fn: async () => {
+        if (!confirm(`Revert ${c.short}? A new inverse commit will be created.`)) return;
+        try { const r = await git("revert", { method: "POST", body: { ref: c.hash } });
+              toast(r.out || "Reverted"); loadGit(); loadGitGraph(); }
+        catch (e) { toast(e.message, true); }
+      } },
+  ]);
+}
+
+function branchActions(name, isCurrent) {
+  const acts = [];
+  if (!isCurrent) {
+    acts.push({ label: "✓ Checkout branch", primary: true, fn: async () => {
+      try { await git("checkout", { method: "POST", body: { ref: name } });
+            toast(`On ${name}`); loadGit(); loadGitGraph(); }
+      catch (e) { toast(e.message, true); }
+    }});
+    acts.push({ label: "⑂ Merge into current branch", fn: async () => {
+      try { const r = await git("merge", { method: "POST", body: { ref: name } });
+            toast(r.out || "Merged"); loadGit(); loadGitGraph(); }
+      catch (e) { toast(e.message, true); }
+    }});
+  } else {
+    acts.push({ label: "✏ Rename branch", primary: true, fn: () => {
+      const nn = prompt(`Rename "${name}" to:`);
+      if (!nn) return;
+      git("branch/rename", { method: "POST", body: { old: name, new: nn } })
+        .then(() => { toast("Renamed"); loadGit(); loadGitGraph(); })
+        .catch((e) => toast(e.message, true));
+    }});
+  }
+  acts.push({ label: "🗑 Delete branch", danger: true, fn: async () => {
+    if (!confirm(`Delete branch "${name}"?`)) return;
+    try { await git("branch/delete", { method: "POST", body: { name, force: false } });
+          toast("Deleted"); loadGitGraph(); loadGit(); }
+    catch (e) {
+      if (confirm(e.message + "\n\nForce delete?")) {
+        try { await git("branch/delete", { method: "POST", body: { name, force: true } });
+              toast("Force deleted"); loadGitGraph(); loadGit(); }
+        catch (e2) { toast(e2.message, true); }
+      }
+    }
+  }});
+  showActions(name, acts);
+}
+
+/* ---------- diff viewer ---------- */
+
+async function openDiff(file, staged) {
+  S.activeView = $$('#bottom-nav button.active')[0].dataset.view;
+  G.diffFile = file; G.diffStaged = staged;
+  $("#diff-file-name").textContent = file;
+  $("#diff-staged-toggle").checked = staged;
+  $("#diff-file-head").classList.remove("hidden");
+  $$(".subtab").forEach((x) => x.classList.remove("active"));
+  $$('.subtab[data-subtab="diff"]').forEach((x) => x.classList.add("active"));
+  $$(".subtab-page").forEach((x) => x.classList.remove("active"));
+  $("#git-diff").classList.add("active");
+  await refreshDiff();
+}
+
+async function refreshDiff() {
+  let text;
+  if (G.diffFile) {
+    const d = await api(`/git/${S.pid}/diff/file?path=${encodeURIComponent(G.diffFile)}&staged=${G.diffStaged}`);
+    text = d.diff;
+  } else {
+    const d = await git("diff");
+    text = d.diff;
+  }
+  renderDiff(text || "(no diff)");
+}
+
+function renderDiff(text) {
+  $("#git-diff-view").innerHTML = text.split("\n").map((l) => {
+    const e = esc(l);
+    if (l.startsWith("@@")) return `<span class="dl dl-hunk">${e}</span>`;
+    if (l.startsWith("+")) return `<span class="dl dl-add">${e}</span>`;
+    if (l.startsWith("-")) return `<span class="dl dl-del">${e}</span>`;
+    return `<span class="dl dl-ctx">${e}</span>`;
+  }).join("\n");
+}
+
+$("#diff-close").addEventListener("click", () => {
+  G.diffFile = null;
+  $("#diff-file-head").classList.add("hidden");
+  refreshDiff();
+});
+
+$("#diff-staged-toggle").addEventListener("change", (e) => {
+  G.diffStaged = e.target.checked;
+  refreshDiff();
+});
+
+/* ---------- stashes ---------- */
+
+async function loadStashes() {
+  if (!S.pid) return;
+  const ul = $("#stash-list");
+  try {
+    const d = await git("stash");
+    ul.innerHTML = "";
+    if (!d.stashes.length)
+      ul.innerHTML = `<li>No stashes. Use “Stash current changes”.</li>`;
+    for (const st of d.stashes) {
+      const li = document.createElement("li");
+      li.innerHTML = `<div><small class="hash">#${st.index}</small> ${esc(st.label)}</div>
+        <div class="git-btns">
+          <button data-a="pop" class="ghost">Pop</button>
+          <button data-a="apply" class="ghost">Apply</button>
+          <button data-a="drop" class="ghost">🗑</button>
+        </div>`;
+      li.querySelectorAll("button").forEach((b) =>
+        b.addEventListener("click", async () => {
+          const a = b.dataset.a;
+          if (a === "drop" && !confirm(`Drop stash #${st.index}?`)) return;
+          try {
+            const r = await git(`stash/${a}`, { method: "POST", body: { index: st.index } });
+            toast(r.out || a + " done"); loadStashes(); loadGit();
+          } catch (e) { toast(e.message, true); }
+        }));
+      ul.appendChild(li);
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
+$("#btn-stash-create").addEventListener("click", async () => {
+  const msg = prompt("Stash message (optional):") || undefined;
+  try {
+    const r = await git("stash", { method: "POST", body: { message: msg } });
+    toast(r.out || "Stashed"); loadStashes(); loadGit();
+  } catch (e) { toast(e.message, true); }
+});
+
+/* ---------- subtab wiring ---------- */
+
+$$(".subtab").forEach((b) =>
+  b.addEventListener("click", () => {
+    $$(".subtab").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    $$(".subtab-page").forEach((x) => x.classList.remove("active"));
+    $(`#git-${b.dataset.subtab}`).classList.add("active");
+    if (b.dataset.subtab === "changes") loadGit();
+    if (b.dataset.subtab === "log") loadGitGraph();
+    if (b.dataset.subtab === "diff") { G.diffFile = null; $("#diff-file-head").classList.add("hidden"); refreshDiff(); }
+    if (b.dataset.subtab === "stashes") loadStashes();
+  })
+);
 
 $$("#view-git .git-btns button").forEach((b) =>
   b.addEventListener("click", async () => {
@@ -395,15 +897,7 @@ $$("#view-git .git-btns button").forEach((b) =>
   })
 );
 
-$("#btn-commit").addEventListener("click", async () => {  const msg = $("#commit-msg").value.trim();
-  if (!msg) return toast("Enter a commit message", true);
-  try {
-    await git("commit", { method: "POST", body: { message: msg } });
-    $("#commit-msg").value = "";
-    toast("Committed");
-    loadGit();
-  } catch (e) { toast(e.message, true); }
-});
+/* ---------------- models ---------------- */
 
 /* ---------------- models ---------------- */
 
@@ -556,6 +1050,8 @@ setInterval(async () => {
 /* ---------------- boot ---------------- */
 
 (async function boot() {
+  applySettings();
+  initSettings();
   await loadProjects();
   if (S.pid) { ensureSession(); loadModels().catch(() => {}); }
   else pushMsg("system", "Welcome to OpenForge 👋\nGo to **Projects** to create your first project.");

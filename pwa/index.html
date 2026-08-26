@@ -25,7 +25,10 @@
     <div id="session-bar">
       <button id="btn-sessions" class="ghost">Sessions</button>
       <button id="btn-new-session" class="ghost accent">+ New</button>
-      <button id="btn-model-pick" class="ghost">Model: …</button>
+      <div class="sb-right" title="Tap to change model">
+        <span id="ctx-inline"></span>
+        <span id="model-label">default</span>
+      </div>
     </div>
     <form id="chat-form">
       <textarea id="chat-input" rows="1" placeholder="Ask opencode… (Enter to send)"></textarea>
@@ -48,25 +51,52 @@
     <div class="git-head card">
       <span id="git-branch" class="chip">–</span>
       <div class="git-btns">
+        <button data-git="stash" class="ghost">Stash</button>
         <button data-git="pull" class="ghost">Pull</button>
         <button data-git="push" class="ghost">Push</button>
-        <button data-git="refresh" class="ghost primary-text">Refresh</button>
+        <button data-git="refresh" class="ghost primary-text">↻</button>
       </div>
     </div>
+    <div id="git-remotes" class="remotes"></div>
     <div class="tabs-sub">
       <button data-subtab="changes" class="subtab active">Changes</button>
-      <button data-subtab="log" class="subtab">Log</button>
+      <button data-subtab="log" class="subtab">Graph</button>
       <button data-subtab="diff" class="subtab">Diff</button>
+      <button data-subtab="stashes" class="subtab">Stash</button>
     </div>
+
+    <!-- changes -->
     <div id="git-changes" class="subtab-page active">
       <div class="card-row">
         <input id="commit-msg" placeholder="Commit message…">
-        <button id="btn-commit" class="primary">Commit all</button>
+        <button id="btn-commit" class="primary">Commit</button>
       </div>
       <ul id="git-files" class="list"></ul>
     </div>
-    <div id="git-log" class="subtab-page"><ul id="git-log-list" class="list commits"></ul></div>
-    <div id="git-diff" class="subtab-page"><pre id="git-diff-view" class="code-view"></pre></div>
+
+    <!-- graph + branches -->
+    <div id="git-log" class="subtab-page">
+      <h3 class="sect">Branches — tap for actions</h3>
+      <div id="branch-chips" class="branch-chips"></div>
+      <h3 class="sect">History — tap a commit for actions</h3>
+      <div id="git-graph" class="code-view graph"></div>
+    </div>
+
+    <!-- diff viewer -->
+    <div id="git-diff" class="subtab-page">
+      <div id="diff-file-head" class="card diff-head hidden">
+        <strong id="diff-file-name"></strong>
+        <label class="check"><input type="checkbox" id="diff-staged-toggle"> staged</label>
+        <button id="diff-close" class="ghost">✕</button>
+      </div>
+      <pre id="git-diff-view" class="code-view"></pre>
+    </div>
+
+    <!-- stashes -->
+    <div id="git-stashes" class="subtab-page">
+      <button id="btn-stash-create" class="primary full">Stash current changes</button>
+      <ul id="stash-list" class="list"></ul>
+    </div>
   </section>
 
   <!-- MODELS -->
@@ -95,7 +125,19 @@
       <textarea id="editor" spellcheck="false"></textarea>
       <button id="editor-save" class="primary full">Save file</button>
     </div>
+  </section>  <!-- SETTINGS -->
+  <section id="view-settings" class="view">
+    <h3 class="sect">Preferences</h3>
+    <div class="card form-col">
+      <label class="check"><input type="checkbox" id="set-reasoning"> Auto-expand reasoning blocks</label>
+      <label class="check"><input type="checkbox" id="set-meta"> Show token usage under messages</label>
+      <label class="check"><input type="checkbox" id="set-live-ctx"> Live context updates while generating</label>
+    </div>
+    <button id="btn-clear-prefs" class="ghost full">Clear saved preferences</button>
+    <h3 class="sect">About</h3>
+    <div id="about-box" class="card about"></div>
   </section>
+
 </main>
 
 <nav id="bottom-nav">
@@ -104,6 +146,7 @@
   <button data-view="git"><span>⑂</span>Git</button>
   <button data-view="models"><span>🧠</span>Models</button>
   <button data-view="files"><span>📄</span>Files</button>
+  <button data-view="settings"><span>⚙️</span>Settings</button>
 </nav>
 
 <div id="toast" class="hidden"></div>
@@ -115,6 +158,14 @@
     <div class="crumbs card"><button id="browser-up" class="ghost">↑ Up</button><span id="browser-path">/</span></div>
     <ul id="browser-list" class="list"></ul>
     <button id="browser-select" class="primary full">Use this folder</button>
+  </div>
+</div>
+
+<!-- contextual action sheet -->
+<div id="action-overlay" class="hidden" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div id="browser-sheet">
+    <div class="card-row"><strong id="action-title"></strong><button class="ghost" onclick="this.closest('#action-overlay').classList.add('hidden')">✕</button></div>
+    <div id="action-buttons"></div>
   </div>
 </div>
 <script src="js/app.js"></script>

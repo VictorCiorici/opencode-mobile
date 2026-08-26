@@ -330,6 +330,138 @@ async def git_discard(pid: str, body: RefIn, _: None = Depends(auth)):
         raise HTTPException(400, str(e))
 
 
+# ------------------------------------------------- advanced git (v2) -------
+
+class FileIn(BaseModel):
+    path: str
+    staged: bool = False
+
+
+class StashPushIn(BaseModel):
+    message: str | None = None
+
+
+class StashIndexIn(BaseModel):
+    index: int
+
+
+class BranchDelIn(BaseModel):
+    name: str
+    force: bool = False
+
+
+class BranchRenameIn(BaseModel):
+    old: str
+    new: str
+
+
+@app.get("/git/{pid}/diff/file")
+async def git_diff_file(pid: str, path: str, staged: bool = False, _: None = Depends(auth)):
+    try:
+        return {"diff": await gitops.diff_file(_proj_or_404(pid), path, staged)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/git/{pid}/stash")
+async def git_stash_list(pid: str, _: None = Depends(auth)):
+    try:
+        return {"stashes": await gitops.stash_list(_proj_or_404(pid))}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/stash")
+async def git_stash_push(pid: str, body: StashPushIn | None = None, _: None = Depends(auth)):
+    try:
+        return {"ok": True,
+                "out": await gitops.stash_push(_proj_or_404(pid), body.message if body else None)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/stash/apply")
+async def git_stash_apply(pid: str, body: StashIndexIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.stash_apply(_proj_or_404(pid), body.index)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/stash/pop")
+async def git_stash_pop(pid: str, body: StashIndexIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.stash_apply(_proj_or_404(pid), body.index, pop=True)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/stash/drop")
+async def git_stash_drop(pid: str, body: StashIndexIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.stash_drop(_proj_or_404(pid), body.index)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/git/{pid}/graph")
+async def git_graph(pid: str, limit: int = 60, _: None = Depends(auth)):
+    try:
+        p = _proj_or_404(pid)
+        return {
+            "commits": await gitops.graph(p, limit),
+            "branches": await gitops.branches(p),
+            "remotes": await gitops.remotes(p),
+            "status": await gitops.status(p),
+        }
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+class BranchCreateIn(BaseModel):
+    name: str
+
+
+@app.post("/git/{pid}/branch/create")
+async def git_branch_create(pid: str, body: BranchCreateIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.branch_create(_proj_or_404(pid), body.name)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/revert")
+async def git_revert(pid: str, body: RefIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.revert_commit(_proj_or_404(pid), body.ref)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/branch/delete")
+async def git_branch_delete(pid: str, body: BranchDelIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.branch_delete(_proj_or_404(pid), body.name, body.force)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/branch/rename")
+async def git_branch_rename(pid: str, body: BranchRenameIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.branch_rename(_proj_or_404(pid), body.old, body.new)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/merge")
+async def git_merge(pid: str, body: RefIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.merge(_proj_or_404(pid), body.ref)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
 # ------------------------------------------------------------------- fs ----
 # Direct read/write for the built-in editor (opencode's file API is read-only).
 
