@@ -1,0 +1,388 @@
+"""opencode-mobile bridge: HTTP API between the Android/PWA client and
+per-project `opencode serve` instances running inside this Debian proot."""
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+
+import httpx
+from fastapi import FastAPI, Request, Response, Depends, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from .config import AUTH_TOKEN, WORKSPACE_DIR
+from . import projects as proj_store
+from . import gitops
+from . import models_cfg
+from .manager import manager
+
+app = FastAPI(title="opencode-mobile", version="0.1.0")
+
+PWA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "pwa"))
+
+
+async def auth(request: Request) -> None:
+    if not AUTH_TOKEN:
+        return
+    header = request.headers.get("authorization", "")
+    if header != f"Bearer {AUTH_TOKEN}":
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+
+    async def reaper() -> None:
+        while True:
+            await asyncio.sleep(300)
+            await manager.reap_idle()
+
+    asyncio.create_task(reaper())
+
+
+# ---------------------------------------------------------------- health ---
+
+@app.get("/api/health")
+async def health(_: None = Depends(auth)):
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            r = await c.get("http://127.0.0.1:4096/global/health")
+        opencode = r.json()
+    except Exception:
+        opencode = {"healthy": False}
+    return {"bridge": "ok", "opencode": opencode}
+
+
+# -------------------------------------------------------------- projects ---
+
+class ProjectIn(BaseModel):
+    name: str
+    git_init: bool = True
+
+
+class ImportIn(BaseModel):
+    path: str
+
+
+@app.get("/api/projects")
+async def list_projects(_: None = Depends(auth)):
+    return {"projects": proj_store.list_projects(), "workspace": str(WORKSPACE_DIR)}
+
+
+@app.post("/api/projects")
+async def create_project(body: ProjectIn, _: None = Depends(auth)):
+    return proj_store.create_project(body.name, body.git_init)
+
+
+@app.delete("/api/projects/{pid}")
+async def delete_project(pid: str, delete_dir: bool = False, _: None = Depends(auth)):
+    ok = await proj_store.remove_project(pid, delete_dir)
+    if not ok:
+        raise HTTPException(404, "project not found")
+    return {"ok": True}
+
+
+@app.post("/api/projects/import")
+async def import_project(body: ImportIn, _: None = Depends(auth)):
+    try:
+        return proj_store.import_project(body.path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/browse")
+async def browse(path: str = "", _: None = Depends(auth)):
+    full = os.path.abspath(os.path.expanduser(path)) if path.strip() else str(Path.home())
+    if not os.path.isdir(full):
+        raise HTTPException(400, "not a folder")
+    entries = []
+    try:
+        for e in sorted(os.scandir(full), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if e.name.startswith(".") and e.is_dir():
+                continue
+            if e.is_dir():
+                entries.append({"name": e.name, "dir": True})
+    except PermissionError:
+        pass
+    return {"path": full, "parent": None if full == "/" else os.path.dirname(full), "entries": entries[:500]}
+
+
+@app.post("/api/projects/{pid}/stop")
+async def stop_project(pid: str, _: None = Depends(auth)):
+    await manager.stop_instance(pid)
+    return {"ok": True}
+
+
+# ------------------------------------------------- opencode proxy (any) ---
+# /oc/{pid}/<rest>  ->  http://127.0.0.1:<port>/<rest>
+# Covers sessions, messages, events (SSE), files, agents, config, ...
+
+
+def _client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=None)
+
+
+@app.api_route("/oc/{pid}/{rest:path}", methods=["GET", "POST", "PATCH", "DELETE", "PUT"])
+async def proxy(pid: str, rest: str, request: Request, _: None = Depends(auth)):
+    try:
+        inst = await manager.get(pid)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+    url = f"{inst.url}/{rest}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    body = await request.body()
+    headers = {k: v for k, v in request.headers.items()
+               if k.lower() in ("content-type", "accept")}
+
+    is_sse = rest == "event" or request.headers.get("accept") == "text/event-stream"
+
+    if is_sse and request.method == "GET":
+        async def stream():
+            async with _client() as c:
+                async with c.stream("GET", url, headers=headers) as r:
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    async with _client() as c:
+        try:
+            r = await c.request(request.method, url, content=body or None, headers=headers)
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"opencode instance error: {e}")
+    return Response(content=r.content, status_code=r.status_code,
+                    media_type=r.headers.get("content-type", "application/json"))
+
+
+# ---------------------------------------------------------------- models ---
+
+class ModelIn(BaseModel):
+    provider_id: str
+    model_id: str
+    options: dict | None = None
+    set_default: bool = False
+
+
+class ModelDel(BaseModel):
+    provider_id: str
+    model_id: str
+
+
+@app.get("/api/models/{pid}")
+async def list_models(pid: str, _: None = Depends(auth)):
+    inst = await manager.get(pid)
+    async with _client() as c:
+        r = await c.get(f"{inst.url}/config/providers")
+    data = r.json()
+    data["default_model"] = models_cfg.current_default()
+    return JSONResponse(data, status_code=r.status_code)
+
+
+@app.post("/api/models/{pid}")
+async def add_model(pid: str, body: ModelIn, _: None = Depends(auth)):
+    proj = proj_store.get_project(pid)
+    cfg = models_cfg.add_model(body.provider_id, body.model_id, body.options,
+                               proj["path"] if proj else None, body.set_default)
+    return {"ok": True, "config": cfg}
+
+
+@app.delete("/api/models/{pid}")
+async def del_model(pid: str, body: ModelDel, _: None = Depends(auth)):
+    cfg = models_cfg.remove_model(body.provider_id, body.model_id)
+    return {"ok": True, "config": cfg}
+
+
+# ------------------------------------------------------------- favorites ---
+
+class FavIn(BaseModel):
+    provider_id: str
+    model_id: str
+
+
+@app.get("/api/favorites")
+async def get_favorites(_: None = Depends(auth)):
+    return {"favorites": models_cfg.list_favorites()}
+
+
+@app.post("/api/favorites")
+async def toggle_favorite(body: FavIn, _: None = Depends(auth)):
+    favs, added = models_cfg.toggle_favorite(body.provider_id, body.model_id)
+    return {"favorites": favs, "added": added}
+
+
+# ------------------------------------------------------------------- git ---
+
+class CommitIn(BaseModel):
+    message: str
+
+
+class BranchIn(BaseModel):
+    name: str
+
+
+class RefIn(BaseModel):
+    ref: str
+
+
+class StageIn(BaseModel):
+    files: list[str] | None = None
+
+
+def _proj_or_404(pid: str) -> str:
+    p = proj_store.get_project(pid)
+    if not p:
+        raise HTTPException(404, "project not found")
+    return p["path"]
+
+
+@app.get("/git/{pid}/status")
+async def git_status(pid: str, _: None = Depends(auth)):
+    try:
+        return await gitops.status(_proj_or_404(pid))
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/git/{pid}/log")
+async def git_log(pid: str, limit: int = 30, _: None = Depends(auth)):
+    try:
+        return {"commits": await gitops.log(_proj_or_404(pid), limit)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/git/{pid}/diff")
+async def git_diff(pid: str, staged: bool = False, _: None = Depends(auth)):
+    try:
+        return {"diff": await gitops.diff(_proj_or_404(pid), staged)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/stage")
+async def git_stage(pid: str, body: StageIn | None = None, _: None = Depends(auth)):
+    try:
+        await gitops.stage(_proj_or_404(pid), body.files if body else None)
+        return {"ok": True}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/commit")
+async def git_commit(pid: str, body: CommitIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.commit(_proj_or_404(pid), body.message)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/push")
+async def git_push(pid: str, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.push(_proj_or_404(pid))}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/pull")
+async def git_pull(pid: str, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.pull(_proj_or_404(pid))}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/git/{pid}/branches")
+async def git_branches(pid: str, _: None = Depends(auth)):
+    try:
+        return await gitops.branches(_proj_or_404(pid))
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/branch")
+async def git_new_branch(pid: str, body: BranchIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.create_branch(_proj_or_404(pid), body.name)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/checkout")
+async def git_checkout(pid: str, body: RefIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.checkout(_proj_or_404(pid), body.ref)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/discard")
+async def git_discard(pid: str, body: RefIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.discard(_proj_or_404(pid), body.ref)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+# ------------------------------------------------------------------- fs ----
+# Direct read/write for the built-in editor (opencode's file API is read-only).
+
+class WriteIn(BaseModel):
+    path: str
+    content: str
+
+
+def _safe_join(root: str, rel: str) -> str:
+    full = os.path.abspath(os.path.join(root, rel))
+    if not full.startswith(os.path.abspath(root)):
+        raise HTTPException(400, "path escapes project root")
+    return full
+
+
+@app.get("/fs/{pid}/read")
+async def fs_read(pid: str, path: str, _: None = Depends(auth)):
+    full = _safe_join(_proj_or_404(pid), path)
+    if not os.path.isfile(full):
+        raise HTTPException(404, "file not found")
+    with open(full, errors="replace") as f:
+        return {"path": path, "content": f.read(1_000_000)}
+
+
+@app.post("/fs/{pid}/write")
+async def fs_write(pid: str, body: WriteIn, _: None = Depends(auth)):
+    full = _safe_join(_proj_or_404(pid), body.path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w") as f:
+        f.write(body.content)
+    return {"ok": True}
+
+
+@app.get("/fs/{pid}/tree")
+async def fs_tree(pid: str, path: str = "", _: None = Depends(auth)):
+    root = _proj_or_404(pid)
+    full = _safe_join(root, path)
+    entries = []
+    try:
+        for e in sorted(os.scandir(full), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if e.name in (".git", "node_modules", "__pycache__"):
+                continue
+            entries.append({"name": e.name, "dir": e.is_dir()})
+    except PermissionError:
+        pass
+    return {"path": path, "entries": entries[:500]}
+
+
+# ------------------------------------------------------------------ PWA ---
+
+if os.path.isdir(PWA_DIR):
+    app.mount("/ui", StaticFiles(directory=PWA_DIR, html=True), name="pwa")
+
+    @app.get("/", include_in_schema=False)
+    async def index():
+        return FileResponse(os.path.join(PWA_DIR, "index.html"))

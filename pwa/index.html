@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0e14">
+<title>OpenForge</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><img src="icons/icon.svg" alt=""><span>OpenForge</span></div>
+  <div class="top-actions">
+    <select id="project-select" title="Project"></select>
+    <span id="conn-dot" class="dot off"></span>
+  </div>
+</header>
+
+<main>
+  <!-- CHAT -->
+  <section id="view-chat" class="view active">
+    <div id="chat-scroll"><div id="chat-messages"></div></div>
+    <div id="session-bar">
+      <button id="btn-sessions" class="ghost">Sessions</button>
+      <button id="btn-new-session" class="ghost accent">+ New</button>
+      <button id="btn-model-pick" class="ghost">Model: …</button>
+    </div>
+    <form id="chat-form">
+      <textarea id="chat-input" rows="1" placeholder="Ask opencode… (Enter to send)"></textarea>
+      <button type="submit" id="chat-send">➤</button>
+    </form>
+  </section>
+
+  <!-- PROJECTS -->
+  <section id="view-projects" class="view">
+    <div class="card-row">
+      <input id="new-project-name" placeholder="New project name…">
+      <button id="btn-create-project" class="primary">Create</button>
+    </div>
+    <button id="btn-import-project" class="ghost full import-btn">📂 Import existing folder…</button>
+    <ul id="project-list" class="list"></ul>
+  </section>
+
+  <!-- GIT -->
+  <section id="view-git" class="view">
+    <div class="git-head card">
+      <span id="git-branch" class="chip">–</span>
+      <div class="git-btns">
+        <button data-git="pull" class="ghost">Pull</button>
+        <button data-git="push" class="ghost">Push</button>
+        <button data-git="refresh" class="ghost primary-text">Refresh</button>
+      </div>
+    </div>
+    <div class="tabs-sub">
+      <button data-subtab="changes" class="subtab active">Changes</button>
+      <button data-subtab="log" class="subtab">Log</button>
+      <button data-subtab="diff" class="subtab">Diff</button>
+    </div>
+    <div id="git-changes" class="subtab-page active">
+      <div class="card-row">
+        <input id="commit-msg" placeholder="Commit message…">
+        <button id="btn-commit" class="primary">Commit all</button>
+      </div>
+      <ul id="git-files" class="list"></ul>
+    </div>
+    <div id="git-log" class="subtab-page"><ul id="git-log-list" class="list commits"></ul></div>
+    <div id="git-diff" class="subtab-page"><pre id="git-diff-view" class="code-view"></pre></div>
+  </section>
+
+  <!-- MODELS -->
+  <section id="view-models" class="view">
+    <details class="card">
+      <summary>Add a model</summary>
+      <div class="form-col">
+        <input id="m-provider" placeholder="provider id (e.g. openai, anthropic, ollama)">
+        <input id="m-model" placeholder="model id (e.g. gpt-4o, qwen2.5-coder)">
+        <input id="m-name" placeholder="display name (optional)">
+        <label class="check"><input type="checkbox" id="m-default"> set as default model</label>
+        <button id="btn-add-model" class="primary">Add model</button>
+      </div>
+    </details>
+    <h3 class="sect">Available models</h3>
+    <div class="card-row"><input id="model-search" placeholder="🔍 Filter models…"></div>
+    <ul id="model-list" class="list"></ul>
+  </section>
+
+  <!-- FILES -->
+  <section id="view-files" class="view">
+    <div class="crumbs card"><button id="files-up" class="ghost">↑ Up</button><span id="files-path">/</span></div>
+    <ul id="file-list" class="list"></ul>
+    <div id="editor-wrap" class="hidden">
+      <div class="card-row"><strong id="editor-name"></strong><button id="editor-close" class="ghost">Close</button></div>
+      <textarea id="editor" spellcheck="false"></textarea>
+      <button id="editor-save" class="primary full">Save file</button>
+    </div>
+  </section>
+</main>
+
+<nav id="bottom-nav">
+  <button data-view="chat" class="active"><span>💬</span>Chat</button>
+  <button data-view="projects"><span>📁</span>Projects</button>
+  <button data-view="git"><span>⑂</span>Git</button>
+  <button data-view="models"><span>🧠</span>Models</button>
+  <button data-view="files"><span>📄</span>Files</button>
+</nav>
+
+<div id="toast" class="hidden"></div>
+
+<!-- folder browser overlay -->
+<div id="browser-overlay" class="hidden">
+  <div id="browser-sheet">
+    <div class="card-row"><strong>Pick a project folder</strong><button id="browser-close" class="ghost">✕</button></div>
+    <div class="crumbs card"><button id="browser-up" class="ghost">↑ Up</button><span id="browser-path">/</span></div>
+    <ul id="browser-list" class="list"></ul>
+    <button id="browser-select" class="primary full">Use this folder</button>
+  </div>
+</div>
+<script src="js/app.js"></script>
+</body>
+</html>

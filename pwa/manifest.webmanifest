@@ -1,0 +1,13 @@
+{
+  "name": "OpenForge — opencode mobile IDE",
+  "short_name": "OpenForge",
+  "description": "Full mobile IDE suite for opencode running in Termux proot Debian",
+  "start_url": "/ui/",
+  "display": "standalone",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
