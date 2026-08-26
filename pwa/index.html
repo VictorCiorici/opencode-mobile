@@ -118,15 +118,23 @@
 
   <!-- FILES -->
   <section id="view-files" class="view">
-    <div class="crumbs card"><button id="files-up" class="ghost">↑ Up</button><span id="files-path">/</span></div>
+    <div class="crumbs card"><button id="files-up" class="ghost">↑ Up</button><span id="files-path">/</span>
+      <input id="file-search" placeholder="🔍 find in current file…" style="flex:1"></div>
     <ul id="file-list" class="list"></ul>
     <div id="editor-wrap" class="hidden">
+      <div id="file-tabs" class="file-tabs"></div>
       <div class="card-row"><strong id="editor-name"></strong><button id="editor-close" class="ghost">Close</button></div>
       <textarea id="editor" spellcheck="false"></textarea>
       <button id="editor-save" class="primary full">Save file</button>
     </div>
   </section>  <!-- SETTINGS -->
   <section id="view-settings" class="view">
+    <h3 class="sect">Connection (remote / SSH tunnel)</h3>
+    <div class="card form-col">
+      <input id="set-url" placeholder="http://127.0.0.1:8787 (leave empty for this device)">
+      <small style="color:var(--muted)">Point the app at a bridge on another machine (e.g. over SSH:
+        <code>ssh -L 8787:127.0.0.1:8787 phone</code>). Needs matching CORS if cross-origin.</small>
+    </div>
     <h3 class="sect">Preferences</h3>
     <div class="card form-col">
       <label class="check"><input type="checkbox" id="set-reasoning"> Auto-expand reasoning blocks</label>
@@ -158,6 +166,19 @@
     <div class="crumbs card"><button id="browser-up" class="ghost">↑ Up</button><span id="browser-path">/</span></div>
     <ul id="browser-list" class="list"></ul>
     <button id="browser-select" class="primary full">Use this folder</button>
+  </div>
+</div>
+
+<!-- session manager overlay -->
+<div id="session-overlay" class="hidden">
+  <div id="browser-sheet">
+    <div class="card-row"><strong> Sessions</strong><button id="session-close" class="ghost">✕</button></div>
+    <div class="git-btns" style="margin-bottom:8px">
+      <button id="session-new" class="ghost accent">+ New</button>
+      <button id="session-todo" class="ghost">Todo list</button>
+      <button id="session-refresh" class="ghost">↻</button>
+    </div>
+    <ul id="session-list" class="list"></ul>
   </div>
 </div>
 

@@ -12,12 +12,12 @@ const S = {
   model: JSON.parse(localStorage.getItem("of.model") || "null"),
   busy: false,
   filesPath: "",
+  url: localStorage.getItem("of.set.url") || "",
 };
 
-/* ---------------- helpers ---------------- */
-
 async function api(path, opts = {}) {
-  const r = await fetch(path, {
+  const base = S.url || "";
+  const r = await fetch(base + path, {
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -211,16 +211,88 @@ $("#btn-new-session").addEventListener("click", async () => {
   toast("New session");
 });
 
-$("#btn-sessions").addEventListener("click", async () => {
-  if (!S.pid) return;
-  S.sessions = await oc("/session");
-  const pick = prompt(
-    "Sessions:\n" + S.sessions.map((s, i) => `${i + 1}. ${s.title || s.id}`).join("\n") +
-    "\n\nEnter number to switch:",
-  );
-  const i = parseInt(pick, 10);
-  if (i >= 1 && i <= S.sessions.length) { S.sid = S.sessions[i - 1].id; renderChat(true); }
+$("#btn-sessions").addEventListener("click", () => openSessionSheet());
+
+/* ---------------- session manager ---------------- */
+
+async function openSessionSheet() {
+  if (!S.pid) { toast("Open a project first", true); return; }
+  $("#session-overlay").classList.remove("hidden");
+  await loadSessions();
+}
+
+async function loadSessions() {
+  try {
+    S.sessions = await oc("/session");
+    const ul = $("#session-list");
+    ul.innerHTML = "";
+    for (const ssn of S.sessions) {
+      const cur = ssn.id === S.sid;
+      const li = document.createElement("li");
+      li.innerHTML = `<div style="min-width:0">
+          <strong style="${cur ? "color:var(--accent)" : ""}">${esc(ssn.title || "Untitled")}</strong>
+          <small style="display:block;color:var(--muted);font-size:11px">${esc(ssn.id)} · ${esc((ssn.tokens?.input||0)+(ssn.tokens?.output||0)+" tok")}</small>
+        </div>
+        <div class="git-btns">
+          <button data-a="open" class="ghost">${cur ? "Open" : "Open"}</button>
+          <button data-a="rename" class="ghost">✎</button>
+          <button data-a="fork" class="ghost">⑂</button>
+          <button data-a="share" class="ghost">🔗</button>
+          <button data-a="del" class="ghost">🗑</button>
+        </div>`;
+      li.querySelectorAll("button").forEach((b) =>
+        b.addEventListener("click", async () => {
+          const a = b.dataset.a;
+          try {
+            if (a === "open") { S.sid = ssn.id; await renderChat(true); $("#session-overlay").classList.add("hidden"); toast("Session opened"); }
+            else if (a === "rename") {
+              const t = prompt("Rename session:", ssn.title || "");
+              if (!t) return;
+              await oc(`/session/${ssn.id}`, { method: "PATCH", body: { title: t } });
+              loadSessions();
+            } else if (a === "fork") {
+              const r = await oc(`/session/${ssn.id}/fork`, { method: "POST", body: {} });
+              S.sid = r.id; await loadSessions(); toast("Forked");
+            } else if (a === "share") {
+              const r = await oc(`/session/${ssn.id}/share`, { method: "POST", body: {} });
+              await navigator.clipboard.writeText(r.shareUrl || r.id).catch(() => {});
+              toast("Share link copied");
+            } else if (a === "del") {
+              if (!confirm("Delete this session?")) return;
+              await oc(`/session/${ssn.id}`, { method: "DELETE" });
+              if (S.sid === ssn.id) S.sid = null;
+              loadSessions(); toast("Deleted");
+            }
+          } catch (e) { toast(e.message, true); }
+        }));
+      ul.appendChild(li);
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadTodos() {
+  if (!S.sid) { toast("Open a session first", true); return; }
+  try {
+    const todos = await oc(`/session/${S.sid}/todo`);
+    const ul = $("#session-list");
+    ul.innerHTML = `<li style="color:var(--muted);font-size:12px">Todos for current session</li>`;
+    if (!todos.length) ul.insertAdjacentHTML("beforeend", `<li>No todos yet</li>`);
+    for (const t of todos) {
+      const mark = t.status === "completed" ? "✅" :
+                   t.status === "in-progress" ? "🔄" : "⬜";
+      ul.insertAdjacentHTML("beforeend",
+        `<li>${mark} ${esc(t.content || t.title || "")}</li>`);
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
+$("#session-close").addEventListener("click", () => $("#session-overlay").classList.add("hidden"));
+$("#session-refresh").addEventListener("click", loadSessions);
+$("#session-new").addEventListener("click", async () => {
+  const s = await oc("/session", { method: "POST", body: {} });
+  S.sid = s.id; await renderChat(true); await loadSessions(); toast("New session");
 });
+$("#session-todo").addEventListener("click", loadTodos);
 
 function updateChatHeader() {
   const m = S.model;
@@ -431,12 +503,24 @@ $(".sb-right").addEventListener("click", () =>
 
 /* ---------------- settings ---------------- */
 
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/ui/sw.js").catch(() => {});
+}
+
 function applySettings() {
   document.body.classList.toggle("hide-meta",
     localStorage.getItem("of.set.meta") !== "1");
 }
 
 function initSettings() {
+  const urlEl = $("#set-url");
+  urlEl.value = S.url;
+  urlEl.addEventListener("change", () => {
+    S.url = urlEl.value.trim().replace(/\/$/, "");
+    localStorage.setItem("of.set.url", S.url);
+    toast(S.url ? "Server URL set — reconnecting" : "Using local bridge");
+    if (S.pid) ensureSession();
+  });
   const map = [
     ["#set-reasoning", "of.set.reasoning"],
     ["#set-meta", "of.set.meta"],
@@ -996,6 +1080,9 @@ $("#btn-add-model").addEventListener("click", async () => {
 
 /* ---------------- files ---------------- */
 
+const FTABS = [];           // open file tabs: {rel, content, dirty}
+let FACTIVE = null;
+
 async function loadFiles(path = "") {
   if (!S.pid) { toast("Open a project first", true); return; }
   try {
@@ -1015,7 +1102,7 @@ async function loadFiles(path = "") {
       li.className = "file-entry";
       li.innerHTML = `<span>${e.dir ? "📁" : "📄"} ${esc(e.name)}</span>`;
       const child = path ? `${path}/${e.name}` : e.name;
-      li.onclick = () => (e.dir ? loadFiles(child) : openEditor(child));
+      li.onclick = () => (e.dir ? loadFiles(child) : openEditor(child, e.name));
       ul.appendChild(li);
     }
   } catch (e) { toast(e.message, true); }
@@ -1024,20 +1111,70 @@ async function loadFiles(path = "") {
 $("#files-up").addEventListener("click", () =>
   loadFiles(S.filesPath.split("/").slice(0, -1).join("/")));
 
-async function openEditor(rel) {
+function renderTabs() {
+  const box = $("#file-tabs");
+  box.innerHTML = "";
+  for (const t of FTABS) {
+    const b = document.createElement("span");
+    b.className = "ftab" + (t === FACTIVE ? " on" : "");
+    b.textContent = (t.dirty ? "● " : "") + t.name;
+    b.onclick = () => showTab(t);
+    box.appendChild(b);
+  }
+}
+
+function showTab(t) {
+  FACTIVE = t;
+  $("#editor-wrap").classList.remove("hidden");
+  $("#editor-name").textContent = t.rel;
+  $("#editor").value = t.content;
+  renderTabs();
+}
+
+async function openEditor(rel, name) {
+  const cached = FTABS.find((t) => t.rel === rel);
+  if (cached) { showTab(cached); return; }
   const d = await api(`/fs/${S.pid}/read?path=${encodeURIComponent(rel)}`);
+  const tab = { rel, name: name || rel.split("/").pop(), content: d.content, dirty: false };
+  FTABS.push(tab); FACTIVE = tab;
   $("#editor-wrap").classList.remove("hidden");
   $("#editor-name").textContent = rel;
   $("#editor").value = d.content;
-  $("#editor-save").onclick = async () => {
-    await api(`/fs/${S.pid}/write`, {
-      method: "POST", body: { path: rel, content: $("#editor").value },
-    });
-    toast("Saved");
-  };
+  renderTabs();
 }
 
-$("#editor-close").addEventListener("click", () => $("#editor-wrap").classList.add("hidden"));
+$("#editor").addEventListener("input", () => {
+  if (FACTIVE) { FACTIVE.content = $("#editor").value; FACTIVE.dirty = true; renderTabs(); }
+});
+$("#editor-save").onclick = async () => {
+  if (!FACTIVE) return;
+  await api(`/fs/${S.pid}/write`, {
+    method: "POST", body: { path: FACTIVE.rel, content: FACTIVE.content },
+  });
+  FACTIVE.dirty = false; renderTabs(); toast("Saved");
+};
+$("#editor-close").addEventListener("click", () => {
+  if (FACTIVE) {
+    FTABS.splice(FTABS.indexOf(FACTIVE), 1);
+    FACTIVE = FTABS[FTABS.length - 1] || null;
+  }
+  if (FACTIVE) showTab(FACTIVE); else $("#editor-wrap").classList.add("hidden");
+  renderTabs();
+});
+
+/* in-file search: highlight occurrences in the open editor */
+$("#file-search").addEventListener("input", (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  const ta = $("#editor");
+  if (!q) { ta.style.background = ""; return; }
+  const hay = ta.value.toLowerCase();
+  if (hay.includes(q)) {
+    const i = hay.indexOf(q);
+    ta.focus();
+    ta.setSelectionRange(i, i + q.length);
+    ta.style.background = "rgba(255,180,84,.12)";
+  }
+});
 
 /* ---------------- health ---------------- */
 

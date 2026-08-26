@@ -250,6 +250,10 @@ body.hide-meta .msg-meta { display: none; }
   margin-right: 5px; vertical-align: 1px; }
 .g-ref.br { color: var(--ok); }
 .g-empty { color: var(--muted); padding: 16px; text-align: center; }
+.file-tabs { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 8px; }
+.ftab { flex: 0 0 auto; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 4px 10px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.ftab.on { color: var(--accent); border-color: var(--accent); }
 .diff-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
   font-family: ui-monospace, monospace; font-size: 13px; }
 .diff-head strong { flex: 1; word-break: break-all; }
