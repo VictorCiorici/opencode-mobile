@@ -268,3 +268,56 @@ body.hide-meta .msg-meta { display: none; }
 .st-D { background: var(--err); color: #3a0d0d; }
 .muted-small { color: var(--muted); font-size: 11px; text-transform: uppercase; }
 button.danger { border-color: var(--err); color: var(--err); }
+
+/* ---------- permissions card ---------- */
+#perm-container { margin-bottom: 8px; }
+.perm-card {
+  background: var(--surface2); border: 1px solid var(--warn); border-radius: 12px;
+  padding: 12px; margin-bottom: 8px; animation: slideup .15s ease-out;
+}
+.perm-title { display: flex; align-items: center; justify-content: space-between; font-weight: 700; color: var(--warn); font-size: 13px; margin-bottom: 6px; }
+.perm-desc { font-size: 13px; margin-bottom: 8px; font-family: ui-monospace, monospace; word-break: break-all; color: var(--text); }
+.perm-btns { display: flex; gap: 6px; }
+.perm-btns button { flex: 1; padding: 6px 10px; font-size: 12px; }
+
+/* ---------- tool calls in chat ---------- */
+.tool-call {
+  background: #0d1117; border: 1px solid var(--border); border-radius: 10px;
+  margin: 6px 0; overflow: hidden; font-size: 12px;
+}
+.tool-call summary {
+  padding: 6px 10px; cursor: pointer; background: rgba(255,255,255,.03);
+  display: flex; align-items: center; justify-content: space-between; font-weight: 600; color: var(--accent);
+}
+.tool-call[open] summary { border-bottom: 1px solid var(--border); }
+.tool-body { padding: 8px 10px; font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; color: #abb2bf; }
+
+/* ---------- message actions ---------- */
+.msg-wrap { position: relative; display: flex; flex-direction: column; }
+.msg-wrap:hover .msg-more-btn, .msg-wrap:focus-within .msg-more-btn { opacity: 1; }
+.msg-more-btn {
+  position: absolute; top: 4px; right: 4px; opacity: .4; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 2px 6px; font-size: 11px;
+  color: var(--muted); cursor: pointer; transition: opacity .15s ease;
+}
+.msg.user + .msg-more-btn { right: auto; left: 4px; }
+
+/* ---------- git conflicts ---------- */
+.conflict-card { border-color: var(--err); margin-bottom: 10px; }
+.conflict-item { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 0; border-top: 1px solid rgba(255,107,107,.2); font-size: 13px; }
+.conflict-item:first-child { border-top: none; }
+.st-conflict { background: var(--err); color: #fff; }
+
+/* ---------- terminal drawer ---------- */
+.term-btn { font-size: 15px; padding: 5px 8px; }
+#term-overlay {
+  position: fixed; inset: 0; background: rgba(4,6,10,.6); z-index: 55;
+  display: flex; align-items: flex-end; backdrop-filter: blur(2px);
+}
+#term-sheet {
+  width: 100%; max-height: 80vh; display: flex; flex-direction: column;
+  background: var(--bg); border-top-left-radius: 20px; border-top-right-radius: 20px;
+  border-top: 1px solid var(--border); padding: calc(env(safe-area-inset-bottom) + 12px) 14px 12px;
+  animation: slideup .18s ease-out;
+}
+#term-output { flex: 1; min-height: 140px; margin-bottom: 8px; }

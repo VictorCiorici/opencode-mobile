@@ -61,6 +61,21 @@ def test_graph_returns_list(repo):
     assert isinstance(commits, list) and commits[0]["short"]
 
 
+def test_remotes_and_exec(repo):
+    out = asyncio.run(gitops.remote_add(str(repo), "origin", "https://github.com/example/test.git"))
+    assert "remote" in out or "origin" in out
+    rems = asyncio.run(gitops.remotes(str(repo)))
+    assert any(r["name"] == "origin" for r in rems)
+    
+    asyncio.run(gitops.remote_set_url(str(repo), "origin", "https://github.com/example/updated.git"))
+    rems2 = asyncio.run(gitops.remotes(str(repo)))
+    assert any("updated" in (r.get("fetch") or "") for r in rems2)
+
+    res = asyncio.run(gitops.exec_cmd(str(repo), "echo 'hello from terminal'"))
+    assert res["ok"] is True
+    assert "hello from terminal" in res["stdout"]
+
+
 # ------------------------------ projects ------------------------------
 
 def test_create_import_remove(workspace):

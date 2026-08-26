@@ -202,6 +202,7 @@ async function ensureSession() {
     }
     await renderChat(true);
     updateChatHeader();
+    initSSE();
   } catch (e) { setConn(false); toast(e.message, true); }
 }
 
@@ -304,16 +305,70 @@ function updateChatHeader() {
 const chatScroll = () => $("#chat-scroll");
 
 function pushMsg(cls, html, id) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg-wrap";
   const el = document.createElement("div");
   el.className = `msg ${cls}`;
   if (id) el.dataset.mid = id;
   el.innerHTML = html;
-  $("#chat-messages").appendChild(el);
+  wrap.appendChild(el);
+  if (id && (cls.includes("user") || cls.includes("assistant"))) {
+    const more = document.createElement("button");
+    more.className = "msg-more-btn";
+    more.textContent = "⋯";
+    more.title = "Message options";
+    more.onclick = (e) => {
+      e.stopPropagation();
+      openMessageMenu(id, cls);
+    };
+    wrap.appendChild(more);
+  }
+  $("#chat-messages").appendChild(wrap);
   chatScroll().scrollTop = chatScroll().scrollHeight;
   return el;
 }
 
-function partHtml(p) {  if (p.type === "text" && (p.text || "").trim())
+function openMessageMenu(mid, role) {
+  showActions("Message Options", [
+    { label: "↩ Revert conversation to here", primary: true, fn: async () => {
+      if (!confirm("Revert conversation back to this turn? Future turns will be undone.")) return;
+      try {
+        await oc(`/session/${S.sid}/revert`, { method: "POST", body: { messageID: mid } });
+        toast("Reverted to checkpoint");
+        $("#btn-unrevert").classList.remove("hidden");
+        renderChat(true);
+      } catch (e) { toast(e.message, true); }
+    } },
+    { label: "⑂ Fork from here into new session", fn: async () => {
+      try {
+        const r = await oc(`/session/${S.sid}/fork`, { method: "POST", body: { messageID: mid } });
+        S.sid = r.id;
+        toast("Forked into new session");
+        renderChat(true);
+      } catch (e) { toast(e.message, true); }
+    } },
+    { label: "📋 Copy message text", fn: async () => {
+      const msgEl = document.querySelector(`[data-mid="${mid}"]`);
+      if (msgEl) {
+        await navigator.clipboard.writeText(msgEl.innerText).catch(() => {});
+        toast("Copied to clipboard");
+      }
+    } }
+  ]);
+}
+
+function renderDiffLines(text) {
+  return (text || "").split("\n").map((l) => {
+    const e = esc(l);
+    if (l.startsWith("@@")) return `<span class="dl dl-hunk">${e}</span>`;
+    if (l.startsWith("+")) return `<span class="dl dl-add">${e}</span>`;
+    if (l.startsWith("-")) return `<span class="dl dl-del">${e}</span>`;
+    return `<span class="dl dl-ctx">${e}</span>`;
+  }).join("\n");
+}
+
+function partHtml(p) {
+  if (p.type === "text" && (p.text || "").trim())
     return md(p.text);
   if (p.type === "reasoning") {
     const t = p.text || "";
@@ -321,8 +376,21 @@ function partHtml(p) {  if (p.type === "text" && (p.text || "").trim())
     const open = localStorage.getItem("of.set.reasoning") === "1" ? " open" : "";
     return `<details class="reasoning"${open}><summary>💭 Reasoning</summary>${esc(t)}</details>`;
   }
-  if (p.type === "tool" && p.state?.title)
-    return `<div class="msg-line tool-line">🔧 ${esc(p.state.title)}</div>`;
+  if (p.type === "tool" || p.tool || p.call) {
+    const title = p.state?.title || p.title || p.tool || "Tool execution";
+    const status = p.state?.status || p.status || "done";
+    const output = p.state?.output || p.output || p.result || "";
+    const input = p.state?.input || p.input || p.args || "";
+    const inStr = typeof input === "object" ? JSON.stringify(input, null, 2) : String(input);
+    const outStr = typeof output === "object" ? JSON.stringify(output, null, 2) : String(output);
+    const badge = status === "running" ? "⏳ running…" : (status === "error" ? "❌ error" : "✓ done");
+    const isDiff = outStr.includes("@@") && (outStr.includes("\n+") || outStr.includes("\n-"));
+    const bodyContent = isDiff ? renderDiffLines(outStr) : esc(outStr || inStr || "(no output)");
+    return `<details class="tool-call">
+      <summary><span>🔧 ${esc(title)}</span> <small style="color:var(--muted)">${badge}</small></summary>
+      <div class="tool-body">${bodyContent}</div>
+    </details>`;
+  }
   return "";
 }
 
@@ -348,6 +416,50 @@ function updateCtxBar(msgs) {
     `<span class="${pct > 75 ? "warn" : ""}">${fmtTok(ctx)} ${pct}%</span>${cost} · `;
 }
 
+/* ---------------- permissions handling ---------------- */
+
+async function checkPermissions() {
+  if (!S.pid || !S.sid) return;
+  try {
+    const res = await oc(`/session/${S.sid}/permission`).catch(() => []);
+    const perms = Array.isArray(res) ? res : (res?.permissions || []);
+    renderPermissions(perms);
+  } catch {}
+}
+
+function renderPermissions(perms) {
+  const box = $("#perm-container");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const p of perms) {
+    const card = document.createElement("div");
+    card.className = "perm-card";
+    const desc = p.command || p.path || p.description || p.title || JSON.stringify(p.params || p);
+    card.innerHTML = `
+      <div class="perm-title"><span>🛡️ Permission Request (${esc(p.type || "action")})</span></div>
+      <div class="perm-desc"><code>${esc(desc)}</code></div>
+      <div class="perm-btns">
+        <button class="primary" data-resp="allow">Allow</button>
+        <button class="ghost" data-resp="allow_session">Always for session</button>
+        <button class="ghost danger" data-resp="deny">Deny</button>
+      </div>`;
+    card.querySelectorAll("button").forEach((b) => {
+      b.onclick = async () => {
+        const resp = b.dataset.resp;
+        try {
+          await oc(`/session/${S.sid}/permission/${p.id}`, {
+            method: "POST",
+            body: { response: resp },
+          });
+          card.remove();
+          toast(`Permission: ${resp}`);
+        } catch (e) { toast(e.message, true); }
+      };
+    });
+    box.appendChild(card);
+  }
+}
+
 async function renderChat(full = false) {
   if (full) $("#chat-messages").innerHTML = "";
   if (!S.pid || !S.sid) {
@@ -355,6 +467,7 @@ async function renderChat(full = false) {
     return;
   }
   try {
+    checkPermissions();
     const msgs = await oc(`/session/${S.sid}/message?limit=50`);
     if (full) {
       // oldest first so new messages appear at the bottom
@@ -504,10 +617,67 @@ $(".sb-right").addEventListener("click", () =>
   $$('#bottom-nav button[data-view="models"]')[0].click()
 );
 
-/* ---------------- settings ---------------- */
+/* ---------------- settings & connection profiles ---------------- */
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/ui/sw.js").catch(() => {});
+}
+
+let sseSource = null;
+function initSSE() {
+  if (sseSource) { sseSource.close(); sseSource = null; }
+  if (!S.pid) return;
+  try {
+    const base = S.url || "";
+    sseSource = new EventSource(`${base}/oc/${S.pid}/event`);
+    sseSource.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === "permission" || data.type === "permission.asked") {
+          checkPermissions();
+        }
+        if (data.sessionID === S.sid || data.sessionId === S.sid) {
+          if (data.type === "message.updated" || data.type === "session.updated") {
+            if (!S.busy) renderChat(false);
+          }
+        }
+      } catch {}
+    };
+    sseSource.onerror = () => {
+      if (sseSource) { sseSource.close(); sseSource = null; }
+    };
+  } catch {}
+}
+
+function renderProfiles() {
+  const box = $("#conn-profiles");
+  if (!box) return;
+  box.innerHTML = "";
+  let profiles = [];
+  try { profiles = JSON.parse(localStorage.getItem("of.profiles") || "[]"); } catch {}
+  if (!profiles.length) {
+    profiles = [
+      { name: "Local Bridge", url: "" },
+      { name: "SSH Tunnel (:8787)", url: "http://127.0.0.1:8787" }
+    ];
+    localStorage.setItem("of.profiles", JSON.stringify(profiles));
+  }
+  for (const p of profiles) {
+    const chip = document.createElement("span");
+    const isCur = (S.url || "") === (p.url || "");
+    chip.className = `chip ${isCur ? "cur" : ""}`;
+    chip.textContent = p.name;
+    chip.onclick = () => {
+      S.url = p.url || "";
+      $("#set-url").value = S.url;
+      localStorage.setItem("of.set.url", S.url);
+      renderProfiles();
+      toast(`Switched to: ${p.name}`);
+      initSSE();
+      if (S.pid) ensureSession();
+    };
+    box.appendChild(chip);
+  }
 }
 
 function applySettings() {
@@ -518,12 +688,33 @@ function applySettings() {
 function initSettings() {
   const urlEl = $("#set-url");
   urlEl.value = S.url;
+  renderProfiles();
+
   urlEl.addEventListener("change", () => {
     S.url = urlEl.value.trim().replace(/\/$/, "");
     localStorage.setItem("of.set.url", S.url);
+    renderProfiles();
     toast(S.url ? "Server URL set — reconnecting" : "Using local bridge");
+    initSSE();
     if (S.pid) ensureSession();
   });
+
+  $("#btn-save-profile")?.addEventListener("click", () => {
+    const url = $("#set-url").value.trim().replace(/\/$/, "");
+    const name = prompt("Profile name (e.g. Home Server, VPS):", url ? url.replace(/https?:\/\//, "") : "Local");
+    if (!name) return;
+    let profiles = [];
+    try { profiles = JSON.parse(localStorage.getItem("of.profiles") || "[]"); } catch {}
+    profiles = profiles.filter((p) => p.name !== name);
+    profiles.push({ name, url });
+    localStorage.setItem("of.profiles", JSON.stringify(profiles));
+    S.url = url;
+    localStorage.setItem("of.set.url", url);
+    renderProfiles();
+    toast(`Saved profile “${name}”`);
+    initSSE();
+  });
+
   const map = [
     ["#set-reasoning", "of.set.reasoning"],
     ["#set-meta", "of.set.meta"],
@@ -531,6 +722,7 @@ function initSettings() {
   ];
   for (const [sel, key] of map) {
     const el = $(sel);
+    if (!el) continue;
     el.checked = (key === "of.set.live" ? localStorage.getItem(key) !== "0"
       : localStorage.getItem(key) === "1");
     el.addEventListener("change", () => {
@@ -549,11 +741,53 @@ function initSettings() {
   });
   api("/api/health").then((h) => {
     $("#about-box").innerHTML =
-      `OpenForge v0.1 · bridge <b>${h.bridge}</b><br>` +
+      `OpenForge v0.2 · bridge <b>${h.bridge}</b><br>` +
       `opencode ${esc(h.opencode?.version || "?")} — ` +
       `${h.opencode?.healthy ? "healthy ✓" : "<span style='color:var(--err)'>offline</span>"}`;
   }).catch(() => { $("#about-box").textContent = "Bridge unreachable"; });
 }
+
+/* ---------------- unrevert & terminal drawer ---------------- */
+
+$("#btn-unrevert")?.addEventListener("click", async () => {
+  if (!S.sid) return;
+  try {
+    await oc(`/session/${S.sid}/unrevert`, { method: "POST", body: {} });
+    toast("Restored undone turns");
+    $("#btn-unrevert").classList.add("hidden");
+    renderChat(true);
+  } catch (e) { toast(e.message, true); }
+});
+
+$("#btn-toggle-term")?.addEventListener("click", () => {
+  if (!S.pid) { toast("Open a project first", true); return; }
+  $("#term-overlay").classList.toggle("hidden");
+  $("#term-input").focus();
+});
+
+$("#term-close")?.addEventListener("click", () => $("#term-overlay").classList.add("hidden"));
+$("#term-clear")?.addEventListener("click", () => { $("#term-output").textContent = ""; });
+
+$("#term-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("#term-input");
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  if (!S.pid) { toast("Select a project first", true); return; }
+  input.value = "";
+  const outBox = $("#term-output");
+  outBox.textContent += `$ ${cmd}\n`;
+  outBox.scrollTop = outBox.scrollHeight;
+  try {
+    const res = await api(`/api/terminal/${S.pid}/exec`, { method: "POST", body: { command: cmd } });
+    if (res.stdout) outBox.textContent += res.stdout;
+    if (res.stderr) outBox.textContent += `[stderr] ${res.stderr}\n`;
+    outBox.textContent += `(exit: ${res.code})\n\n`;
+  } catch (err) {
+    outBox.textContent += `Error: ${err.message}\n\n`;
+  }
+  outBox.scrollTop = outBox.scrollHeight;
+});
 
 /* ---------------- folder browser (import existing project) ---------------- */
 
@@ -665,8 +899,49 @@ function allFiles() {
 function renderGitFiles() {
   const ul = $("#git-files");
   ul.innerHTML = "";
+  const s = G.status;
+
+  // Render Conflicts if any
+  const confWrap = $("#git-conflicts-wrap");
+  const confList = $("#git-conflicts-list");
+  if (s && s.conflicts && s.conflicts.length) {
+    confWrap.classList.remove("hidden");
+    confList.innerHTML = "";
+    for (const c of s.conflicts) {
+      const row = document.createElement("div");
+      row.className = "conflict-item";
+      row.innerHTML = `<span style="word-break:break-all"><strong style="color:var(--err)">⚡ ${esc(c.path)}</strong></span>
+        <div class="git-btns">
+          <button data-choice="ours" class="ghost" style="padding:4px 8px;font-size:11px">Ours</button>
+          <button data-choice="theirs" class="ghost" style="padding:4px 8px;font-size:11px">Theirs</button>
+          <button data-choice="edit" class="ghost" style="padding:4px 8px;font-size:11px">Edit</button>
+        </div>`;
+      row.querySelectorAll("button").forEach((b) => {
+        b.onclick = async () => {
+          const choice = b.dataset.choice;
+          if (choice === "edit") {
+            $$('#bottom-nav button[data-view="files"]')[0].click();
+            openEditor(c.path);
+          } else {
+            try {
+              const r = await api(`/git/${S.pid}/resolve`, { method: "POST", body: { path: c.path, choice } });
+              toast(r.out || "Conflict resolved");
+              loadGit();
+            } catch (err) { toast(err.message, true); }
+          }
+        };
+      });
+      confList.appendChild(row);
+    }
+  } else if (confWrap) {
+    confWrap.classList.add("hidden");
+  }
+
   const files = allFiles();
-  if (!files.length) { ul.innerHTML = `<li>Working tree clean ✓</li>`; return; }
+  if (!files.length && (!s?.conflicts || !s.conflicts.length)) {
+    ul.innerHTML = `<li>Working tree clean ✓</li>`;
+    return;
+  }
   for (const f of files) {
     const li = document.createElement("li");
     li.className = "git-file";
@@ -970,7 +1245,7 @@ $$(".subtab").forEach((b) =>
   })
 );
 
-$$("#view-git .git-btns button").forEach((b) =>
+$$("#view-git .git-btns button[data-git]").forEach((b) =>
   b.addEventListener("click", async () => {
     const a = b.dataset.git;
     try {
@@ -983,6 +1258,61 @@ $$("#view-git .git-btns button").forEach((b) =>
     finally { b.disabled = false; }
   })
 );
+
+$("#btn-git-remote")?.addEventListener("click", async () => {
+  if (!S.pid) { toast("Open a project first", true); return; }
+  try {
+    const d = await git("graph");
+    const rems = d.remotes || [];
+    const actions = [
+      { label: "+ Add new remote (e.g. origin)", primary: true, fn: async () => {
+        const name = prompt("Remote name (e.g. origin):", "origin");
+        if (!name) return;
+        const url = prompt(`Remote URL for "${name}":`);
+        if (!url) return;
+        try {
+          const r = await api(`/git/${S.pid}/remote/add`, { method: "POST", body: { name, url } });
+          toast(r.out || "Remote added");
+          loadGit();
+        } catch (e) { toast(e.message, true); }
+      } },
+      { label: "↓ Fetch from remotes", fn: async () => {
+        try {
+          const r = await api(`/git/${S.pid}/fetch`, { method: "POST", body: {} });
+          toast(r.out || "Fetched");
+          loadGit(); loadGitGraph();
+        } catch (e) { toast(e.message, true); }
+      } }
+    ];
+    for (const r of rems) {
+      actions.push({
+        label: `✎ Edit "${r.name}" URL (${r.fetch || r.push || ""})`,
+        fn: async () => {
+          const u = prompt(`New URL for remote "${r.name}":`, r.fetch || r.push || "");
+          if (!u) return;
+          try {
+            await api(`/git/${S.pid}/remote/set-url`, { method: "POST", body: { name: r.name, url: u } });
+            toast("Remote URL updated");
+            loadGit();
+          } catch (e) { toast(e.message, true); }
+        }
+      });
+      actions.push({
+        label: `🗑 Remove remote "${r.name}"`,
+        danger: true,
+        fn: async () => {
+          if (!confirm(`Remove remote "${r.name}"?`)) return;
+          try {
+            await api(`/git/${S.pid}/remote/remove`, { method: "POST", body: { name: r.name } });
+            toast("Remote removed");
+            loadGit();
+          } catch (e) { toast(e.message, true); }
+        }
+      });
+    }
+    showActions("Git Remotes Management", actions);
+  } catch (e) { toast(e.message, true); }
+});
 
 /* ---------------- models ---------------- */
 

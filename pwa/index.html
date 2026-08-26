@@ -13,6 +13,7 @@
 <header id="topbar">
   <div class="brand"><img src="icons/icon.svg" alt=""><span>OpenForge</span></div>
   <div class="top-actions">
+    <button id="btn-toggle-term" class="ghost term-btn" title="Terminal">📟</button>
     <select id="project-select" title="Project"></select>
     <span id="conn-dot" class="dot off"></span>
   </div>
@@ -21,10 +22,12 @@
 <main>
   <!-- CHAT -->
   <section id="view-chat" class="view active">
+    <div id="perm-container"></div>
     <div id="chat-scroll"><div id="chat-messages"></div></div>
     <div id="session-bar">
       <button id="btn-sessions" class="ghost">Sessions</button>
       <button id="btn-new-session" class="ghost accent">+ New</button>
+      <button id="btn-unrevert" class="ghost hidden" title="Redo reverted turns">↪ Redo</button>
       <div class="sb-right" title="Tap to change model">
         <span id="ctx-inline"></span>
         <span id="model-label">default</span>
@@ -52,6 +55,7 @@
     <div class="git-head card">
       <span id="git-branch" class="chip">–</span>
       <div class="git-btns">
+        <button id="btn-git-remote" class="ghost">Remote</button>
         <button data-git="stash" class="ghost">Stash</button>
         <button data-git="pull" class="ghost">Pull</button>
         <button data-git="push" class="ghost">Push</button>
@@ -68,6 +72,12 @@
 
     <!-- changes -->
     <div id="git-changes" class="subtab-page active">
+      <div id="git-conflicts-wrap" class="hidden">
+        <div class="card conflict-card">
+          <strong style="color:var(--err)">⚠️ Merge Conflicts Detected</strong>
+          <div id="git-conflicts-list"></div>
+        </div>
+      </div>
       <div class="card-row">
         <input id="commit-msg" placeholder="Commit message…">
         <button id="btn-commit" class="primary">Commit</button>
@@ -134,13 +144,18 @@
       <textarea id="editor" spellcheck="false"></textarea>
       <button id="editor-save" class="primary full">Save file</button>
     </div>
-  </section>  <!-- SETTINGS -->
+  </section>
+
+  <!-- SETTINGS -->
   <section id="view-settings" class="view">
-    <h3 class="sect">Connection (remote / SSH tunnel)</h3>
+    <h3 class="sect">Connection & Profiles</h3>
     <div class="card form-col">
-      <input id="set-url" placeholder="http://127.0.0.1:8787 (leave empty for this device)">
-      <small style="color:var(--muted)">Point the app at a bridge on another machine (e.g. over SSH:
-        <code>ssh -L 8787:127.0.0.1:8787 phone</code>). Needs matching CORS if cross-origin.</small>
+      <div id="conn-profiles" class="branch-chips" style="margin-bottom:8px"></div>
+      <div class="card-row" style="margin-bottom:0">
+        <input id="set-url" placeholder="http://127.0.0.1:8787 (leave empty for local)">
+        <button id="btn-save-profile" class="ghost">Save</button>
+      </div>
+      <small style="color:var(--muted)">Connect to a local bridge or remote server over SSH tunnel/Tailscale.</small>
     </div>
     <h3 class="sect">Preferences</h3>
     <div class="card form-col">
@@ -166,6 +181,22 @@
 
 <div id="toast" class="hidden"></div>
 
+<!-- terminal drawer overlay -->
+<div id="term-overlay" class="hidden">
+  <div id="term-sheet">
+    <div class="card-row" style="margin-bottom:6px">
+      <strong>📟 Project Terminal</strong>
+      <button id="term-clear" class="ghost" style="padding:4px 8px;font-size:12px">Clear</button>
+      <button id="term-close" class="ghost" style="padding:4px 8px;font-size:12px">✕</button>
+    </div>
+    <pre id="term-output" class="code-view" style="max-height:35vh;min-height:120px"></pre>
+    <form id="term-form" class="card-row" style="margin-top:8px;margin-bottom:0">
+      <input id="term-input" placeholder="bash command (e.g. npm test, ls -la)…">
+      <button type="submit" class="primary">Run</button>
+    </form>
+  </div>
+</div>
+
 <!-- folder browser overlay -->
 <div id="browser-overlay" class="hidden">
   <div id="browser-sheet">
@@ -179,7 +210,7 @@
 <!-- session manager overlay -->
 <div id="session-overlay" class="hidden">
   <div id="browser-sheet">
-    <div class="card-row"><strong> Sessions</strong><button id="session-close" class="ghost">✕</button></div>
+    <div class="card-row"><strong>Sessions</strong><button id="session-close" class="ghost">✕</button></div>
     <div class="git-btns" style="margin-bottom:8px">
       <button id="session-new" class="ghost accent">+ New</button>
       <button id="session-todo" class="ghost">Todo list</button>

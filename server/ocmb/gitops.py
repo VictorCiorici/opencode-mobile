@@ -31,20 +31,29 @@ def _safe_path(root: str, rel: str) -> str:
 
 async def status(path: str) -> dict:
     porcelain = await _run(path, "status", "--porcelain=v1", "-b")
-    staged, unstaged, untracked = [], [], []
+    staged, unstaged, untracked, conflicts = [], [], [], []
     for line in porcelain.splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         x, y, name = line[0], line[1], line[3:].strip()
         entry = {"x": x, "y": y, "path": name}
-        if x == "?" :
+        if x + y in ("DD", "AU", "UD", "UA", "DU", "AA", "UU") or x == "U" or y == "U":
+            conflicts.append(entry)
+        elif x == "?":
             untracked.append(entry)
         elif x not in (" ", "?"):
             staged.append(entry)
         elif y != " ":
             unstaged.append(entry)
     branch = porcelain.splitlines()[0][2:] if porcelain else ""
-    return {"branch": branch, "staged": staged, "unstaged": unstaged, "untracked": untracked}
+    return {
+        "branch": branch,
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "conflicts": conflicts,
+        "has_conflicts": len(conflicts) > 0,
+    }
 
 
 async def log(path: str, limit: int = 30) -> list[dict]:
@@ -242,3 +251,61 @@ async def remotes(path: str) -> list[dict]:
             elif "(push)" in line:
                 r["push"] = parts[1]
     return list(seen.values())
+
+
+async def remote_add(path: str, name: str, url: str) -> str:
+    out = await _run(path, "remote", "add", name, url)
+    return out.strip() or f"remote {name} added"
+
+
+async def remote_set_url(path: str, name: str, url: str) -> str:
+    out = await _run(path, "remote", "set-url", name, url)
+    return out.strip() or f"remote {name} updated"
+
+
+async def remote_remove(path: str, name: str) -> str:
+    out = await _run(path, "remote", "remove", name)
+    return out.strip() or f"remote {name} removed"
+
+
+async def fetch(path: str, remote: str = "origin") -> str:
+    out = await _run(path, "fetch", remote)
+    return out.strip() or f"fetched from {remote}"
+
+
+async def resolve_conflict(path: str, file_rel: str, choice: str = "ours") -> str:
+    full = _safe_path(path, file_rel)
+    rel = full.removeprefix(os.path.abspath(path)).lstrip("/")
+    flag = "--ours" if choice == "ours" else "--theirs"
+    await _run(path, "checkout", flag, "--", rel)
+    await stage(path, [rel])
+    return f"resolved {rel} using {choice}"
+
+
+async def exec_cmd(path: str, command: str, timeout: float = 30.0) -> dict:
+    """Execute a bash command in the project directory."""
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        cwd=path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return {
+            "ok": proc.returncode == 0,
+            "code": proc.returncode,
+            "stdout": out.decode(errors="replace"),
+            "stderr": err.decode(errors="replace"),
+        }
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return {
+            "ok": False,
+            "code": -1,
+            "stdout": "",
+            "stderr": f"Command timed out after {timeout}s",
+        }

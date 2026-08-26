@@ -472,6 +472,74 @@ async def git_merge(pid: str, body: RefIn, _: None = Depends(auth)):
         raise HTTPException(400, str(e))
 
 
+class RemoteIn(BaseModel):
+    name: str
+    url: str
+
+
+class RemoteNameIn(BaseModel):
+    name: str
+
+
+class ResolveIn(BaseModel):
+    path: str
+    choice: str = "ours"
+
+
+class ExecIn(BaseModel):
+    command: str
+    timeout: float = 30.0
+
+
+@app.post("/git/{pid}/remote/add")
+async def git_remote_add(pid: str, body: RemoteIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.remote_add(_proj_or_404(pid), body.name, body.url)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/remote/set-url")
+async def git_remote_set_url(pid: str, body: RemoteIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.remote_set_url(_proj_or_404(pid), body.name, body.url)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/remote/remove")
+async def git_remote_remove(pid: str, body: RemoteNameIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.remote_remove(_proj_or_404(pid), body.name)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/fetch")
+async def git_fetch(pid: str, body: RemoteNameIn | None = None, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.fetch(_proj_or_404(pid), body.name if body else "origin")}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/git/{pid}/resolve")
+async def git_resolve(pid: str, body: ResolveIn, _: None = Depends(auth)):
+    try:
+        return {"ok": True, "out": await gitops.resolve_conflict(_proj_or_404(pid), body.path, body.choice)}
+    except gitops.GitError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/terminal/{pid}/exec")
+async def terminal_exec(pid: str, body: ExecIn, _: None = Depends(auth)):
+    try:
+        p = _proj_or_404(pid)
+        return await gitops.exec_cmd(p, body.command, body.timeout)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
 # ------------------------------------------------------------------- fs ----
 # Direct read/write for the built-in editor (opencode's file API is read-only).
 
