@@ -620,7 +620,7 @@ $(".sb-right").addEventListener("click", () =>
 /* ---------------- settings & connection profiles ---------------- */
 
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/ui/sw.js").catch(() => {});
+  navigator.serviceWorker.register("/ui/sw.js").then((reg) => reg.update()).catch(() => {});
 }
 
 let sseSource = null;
