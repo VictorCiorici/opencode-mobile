@@ -165,7 +165,7 @@ public class MainActivity extends Activity {
     private void waitForServerAndLoad(String targetUrl) {
         new Thread(() -> {
             boolean ready = false;
-            for (int i = 0; i < 15; i++) {
+            for (int i = 0; i < 35; i++) {
                 if (ProcessManager.isServerHealthy("http://127.0.0.1:8787/api/health")) {
                     ready = true;
                     break;
@@ -177,7 +177,7 @@ public class MainActivity extends Activity {
                 web.loadUrl(finalUrl);
                 handler.postDelayed(() -> {
                     if (splashView != null) splashView.setVisibility(View.GONE);
-                }, 1000);
+                }, 600);
             });
         }).start();
     }

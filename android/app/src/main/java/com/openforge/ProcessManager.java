@@ -15,7 +15,6 @@ public class ProcessManager {
     private static final String TAG = "ProcessManager";
     private static ProcessManager instance;
     private Process bridgeProcess;
-    private Process opencodeProcess;
 
     public static synchronized ProcessManager getInstance() {
         if (instance == null) {
@@ -26,52 +25,51 @@ public class ProcessManager {
 
     public synchronized void startProcesses(Context context) {
         if (isServerHealthy("http://127.0.0.1:8787/api/health")) {
-            Log.i(TAG, "Bridge server is already running");
+            Log.i(TAG, "Bridge server is already healthy on 127.0.0.1:8787");
             return;
         }
 
         File filesDir = context.getFilesDir();
         File serverDir = new File(filesDir, "server");
         File logFile = new File(filesDir, "daemon.log");
+        File pythonHome = new File(filesDir, "python");
+        File bundledPython = new File(pythonHome, "bin/python3");
 
         try {
             Map<String, String> env = new HashMap<>(System.getenv());
             env.put("HOME", filesDir.getAbsolutePath());
             env.put("TMPDIR", context.getCacheDir().getAbsolutePath());
-            env.put("OCMB_WORKSPACE", new File(filesDir, "projects").getAbsolutePath());
-
-            // Build PATH prioritizing internal bin, termux bin if present, and system bin
-            StringBuilder pathBuilder = new StringBuilder();
-            String[] searchBins = {
-                new File(filesDir, "bin").getAbsolutePath(),
-                new File(filesDir, "usr/bin").getAbsolutePath(),
-                new File(filesDir, "python/bin").getAbsolutePath(),
-                "/data/data/com.termux/files/usr/bin"
-            };
-
-            for (String p : searchBins) {
-                if (new File(p).exists()) {
-                    pathBuilder.append(p).append(":");
-                }
+            
+            // Default workspace directory
+            File defaultWs = new File("/sdcard/OpenForge/projects");
+            if (!defaultWs.exists()) {
+                defaultWs.mkdirs();
             }
+            env.put("OCMB_WORKSPACE", defaultWs.exists() ? defaultWs.getAbsolutePath() : new File(filesDir, "projects").getAbsolutePath());
+
+            // Build PATH and Python environment
+            if (pythonHome.exists()) {
+                env.put("PYTHONHOME", pythonHome.getAbsolutePath());
+                env.put("PYTHONPATH", serverDir.getAbsolutePath() + ":" + new File(pythonHome, "lib/python3.11/site-packages").getAbsolutePath());
+                env.put("LD_LIBRARY_PATH", new File(pythonHome, "lib").getAbsolutePath() + (env.containsKey("LD_LIBRARY_PATH") ? ":" + env.get("LD_LIBRARY_PATH") : ""));
+            }
+
+            StringBuilder pathBuilder = new StringBuilder();
+            if (bundledPython.exists()) {
+                pathBuilder.append(bundledPython.getParentFile().getAbsolutePath()).append(":");
+            }
+            pathBuilder.append(new File(filesDir, "bin").getAbsolutePath()).append(":");
+            pathBuilder.append("/data/data/com.termux/files/usr/bin:");
             if (env.containsKey("PATH")) {
                 pathBuilder.append(env.get("PATH"));
             }
             env.put("PATH", pathBuilder.toString());
 
-            // Find python binary
-            String pythonBin = findExecutable("python3", searchBins);
-            if (pythonBin == null) {
-                pythonBin = findExecutable("python", searchBins);
-            }
-            if (pythonBin == null) {
-                pythonBin = "python3"; // fallback
-            }
-
-            Log.i(TAG, "Using Python binary: " + pythonBin + " with PATH=" + pathBuilder);
+            String pythonExec = bundledPython.exists() ? bundledPython.getAbsolutePath() : "python3";
+            Log.i(TAG, "Launching standalone bridge with: " + pythonExec + " (PYTHONHOME=" + env.get("PYTHONHOME") + ")");
 
             ProcessBuilder pb = new ProcessBuilder(
-                pythonBin, "-m", "uvicorn", "ocmb.main:app",
+                pythonExec, "-m", "uvicorn", "ocmb.main:app",
                 "--app-dir", serverDir.getAbsolutePath(),
                 "--host", "127.0.0.1",
                 "--port", "8787"
@@ -82,7 +80,7 @@ public class ProcessManager {
 
             bridgeProcess = pb.start();
 
-            // Pipe output to daemon.log
+            // Pipe daemon logs
             new Thread(() -> {
                 try (InputStream in = bridgeProcess.getInputStream();
                      FileOutputStream out = new FileOutputStream(logFile, true)) {
@@ -94,21 +92,11 @@ public class ProcessManager {
                 } catch (Exception ignored) {}
             }).start();
 
-            Log.i(TAG, "Bridge process spawned");
+            Log.i(TAG, "Standalone bridge daemon process successfully launched");
 
         } catch (Exception e) {
-            Log.e(TAG, "Failed to start daemon processes", e);
+            Log.e(TAG, "Failed to launch standalone bridge process", e);
         }
-    }
-
-    private static String findExecutable(String name, String[] searchPaths) {
-        for (String dir : searchPaths) {
-            File f = new File(dir, name);
-            if (f.exists() && f.canExecute()) {
-                return f.getAbsolutePath();
-            }
-        }
-        return null;
     }
 
     public synchronized void stopProcesses() {
@@ -116,11 +104,7 @@ public class ProcessManager {
             bridgeProcess.destroy();
             bridgeProcess = null;
         }
-        if (opencodeProcess != null) {
-            opencodeProcess.destroy();
-            opencodeProcess = null;
-        }
-        Log.i(TAG, "Daemon processes stopped");
+        Log.i(TAG, "Bridge daemon stopped");
     }
 
     public static boolean isServerHealthy(String urlStr) {
