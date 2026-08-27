@@ -214,9 +214,19 @@ public class ProcessManager {
         }
     }
 
+    /** java.lang.Process#pid() exists only on API 26+; resolve reflectively. */
+    private static long procPid(Process p) {
+        try {
+            Object r = Process.class.getMethod("pid").invoke(p);
+            return (Long) r;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     private static void writePidFile(Context context, Process p) {
         try {
-            long pid = p.pid(); // API 26+; below that the file simply stays absent
+            long pid = procPid(p);
             if (pid <= 0) return;
             FileOutputStream out = new FileOutputStream(pidFile(context), false);
             out.write(String.valueOf(pid).getBytes("UTF-8"));
