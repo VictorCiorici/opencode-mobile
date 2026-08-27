@@ -1,5 +1,5 @@
 /* OpenForge service worker — network-first with offline shell fallback */
-const CACHE = "openforge-v2";
+const CACHE = "openforge-v3";
 const SHELL = [
   "/ui/", "/ui/index.html", "/ui/css/app.css", "/ui/js/app.js",
   "/ui/manifest.webmanifest", "/ui/icons/icon.svg",
@@ -12,7 +12,8 @@ self.addEventListener("install", (e) => {
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys().then((ks) =>
-      Promise.all(ks.map((k) => caches.delete(k)))
+      // Delete only stale caches — never the freshly installed one.
+      Promise.all(ks.map((k) => (k === CACHE ? null : caches.delete(k))))
     ).then(() => self.clients.claim())
   );
 });

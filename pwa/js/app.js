@@ -13,7 +13,18 @@ const S = {
   busy: false,
   filesPath: "",
   url: localStorage.getItem("of.set.url") || "",
+  genSeq: 0,
 };
+
+/* Bridge auth token: injected by the Android host via JS interface, or set
+   manually in Settings → Connection for remote daemons. */
+function bridgeToken() {
+  try {
+    const injected = window.OpenForgeBridge && window.OpenForgeBridge.bridgeToken();
+    if (injected) return injected;
+  } catch {}
+  return localStorage.getItem("of.set.token") || "";
+}
 
 function getApiBase() {
   if (S.url && S.url.startsWith("http")) return S.url;
@@ -26,10 +37,14 @@ function getApiBase() {
 
 async function api(path, opts = {}) {
   const base = getApiBase();
+  const { headers: extraHeaders = {}, body, ...rest } = opts;
+  const headers = { "Content-Type": "application/json", ...extraHeaders };
+  const tok = bridgeToken();
+  if (tok) headers["Authorization"] = `Bearer ${tok}`;
   const r = await fetch(base + path, {
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    ...rest,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
   });
   const ct = r.headers.get("content-type") || "";
   if (!r.ok) {
@@ -55,13 +70,13 @@ const git = (a, o) => api(`/git/${S.pid}/${a}`, o);
 function toast(msg, err = false, ms = 2600) {
   const t = $("#toast");
   t.textContent = msg;
-  t.className = err ? "err" : "";
+  t.className = err ? "err show" : "show";
   clearTimeout(t._h);
-  t._h = setTimeout(() => t.classList.add("hidden"), ms);
+  t._h = setTimeout(() => t.classList.remove("show"), ms);
 }
 
 function esc(s) {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 /* ---------------- syntax highlighting ---------------- */
@@ -209,11 +224,11 @@ function renderProjectList() {
 
 /* ---------------- folder browser & project import ---------------- */
 
-let BROWSE_PATH = "/sdcard";
+let BROWSE_PATH = "";
 
 async function openFolderBrowser(initialPath = "") {
   $("#browser-overlay").classList.remove("hidden");
-  BROWSE_PATH = initialPath || BROWSE_PATH || "/sdcard";
+  BROWSE_PATH = initialPath || BROWSE_PATH || "";
   await loadBrowseDir(BROWSE_PATH);
 }
 
@@ -223,23 +238,27 @@ async function loadBrowseDir(path) {
   $("#browser-path").textContent = path;
   try {
     const res = await api(`/api/browse?path=${encodeURIComponent(path)}`);
-    BROWSE_PATH = res.current || path;
+    BROWSE_PATH = res.current || res.path || path;
     $("#browser-path").textContent = BROWSE_PATH;
-    $("#browser-up").onclick = () => {
-      if (res.parent) loadBrowseDir(res.parent);
-    };
     ul.innerHTML = "";
-    const entries = (res.entries || []).filter(e => e.is_dir);
-    if (!entries.length) {
+    const entries = (res.entries || []).filter((e) => e.is_dir || e.dir);
+    if (!entries.length && !res.parent) {
       ul.innerHTML = `<li style="color:var(--muted);padding:8px">No subfolders here</li>`;
-      return;
+    }
+    if (res.parent) {
+      const up = document.createElement("li");
+      up.className = "file-entry";
+      up.style.cursor = "pointer";
+      up.innerHTML = `<div style="padding:4px 0"><strong>↩ ..</strong></div>`;
+      up.onclick = () => loadBrowseDir(res.parent);
+      ul.appendChild(up);
     }
     for (const e of entries) {
       const li = document.createElement("li");
       li.className = "file-entry";
       li.style.cursor = "pointer";
       li.innerHTML = `<div style="padding:4px 0"><strong>📁 ${esc(e.name)}</strong></div>`;
-      li.onclick = () => loadBrowseDir(e.path);
+      li.onclick = () => loadBrowseDir(e.path || `${BROWSE_PATH}/${e.name}`.replace(/\/+/, "/"));
       ul.appendChild(li);
     }
   } catch (err) {
@@ -296,10 +315,12 @@ async function ensureSession() {
 
 $("#btn-new-session").addEventListener("click", async () => {
   if (!S.pid) return toast("Select a project first", true);
-  const s = await oc("/session", { method: "POST", body: {} });
-  S.sid = s.id;
-  renderChat(true);
-  toast("New session");
+  try {
+    const s = await oc("/session", { method: "POST", body: {} });
+    S.sid = s.id;
+    renderChat(true);
+    toast("New session");
+  } catch (e) { toast(e.message, true); }
 });
 
 $("#btn-sessions").addEventListener("click", () => openSessionSheet());
@@ -385,8 +406,10 @@ async function loadTodos() {
 $("#session-close").addEventListener("click", () => $("#session-overlay").classList.add("hidden"));
 $("#session-refresh").addEventListener("click", loadSessions);
 $("#session-new").addEventListener("click", async () => {
-  const s = await oc("/session", { method: "POST", body: {} });
-  S.sid = s.id; await renderChat(true); await loadSessions(); toast("New session");
+  try {
+    const s = await oc("/session", { method: "POST", body: {} });
+    S.sid = s.id; await renderChat(true); await loadSessions(); toast("New session");
+  } catch (e) { toast(e.message, true); }
 });
 $("#session-todo").addEventListener("click", loadTodos);
 
@@ -476,11 +499,12 @@ function partHtml(p) {
     const input = p.state?.input || p.input || p.args || "";
     const inStr = typeof input === "object" ? JSON.stringify(input, null, 2) : String(input);
     const outStr = typeof output === "object" ? JSON.stringify(output, null, 2) : String(output);
-    const badge = status === "running" ? "⏳ running…" : (status === "error" ? "❌ error" : "✓ done");
+    const isRunning = status === "running";
+    const badge = isRunning ? "⏳ running…" : (status === "error" ? "❌ error" : "✓ done");
     const isDiff = outStr.includes("@@") && (outStr.includes("\n+") || outStr.includes("\n-"));
     const bodyContent = isDiff ? renderDiffLines(outStr) : esc(outStr || inStr || "(no output)");
-    return `<details class="tool-call">
-      <summary><span>🔧 ${esc(title)}</span> <small style="color:var(--muted)">${badge}</small></summary>
+    return `<details class="tool-call${isRunning ? " running" : ""}">
+      <summary><span>🔧 ${esc(title)}</span> <small style="color:var(--muted)">${esc(badge)}</small></summary>
       <div class="tool-body">${bodyContent}</div>
     </details>`;
   }
@@ -593,7 +617,13 @@ async function renderChat(full = false) {
     }
     updateCtxBar(msgs);
     setConn(true);
-  } catch (e) { setConn(false); }
+  } catch (e) {
+    setConn(false);
+    if (!renderChat._warned || Date.now() - renderChat._warned > 15000) {
+      renderChat._warned = Date.now();
+      toast(e.message || "Failed to load messages", true);
+    }
+  }
 }
 
 $("#chat-input").addEventListener("keydown", (e) => {
@@ -614,22 +644,26 @@ $("#chat-form").addEventListener("submit", (e) => {
 async function sendPrompt(text, retryOf = false) {
   if (S.busy || !S.pid || !S.sid) return;
   S.lastSent = text;
+  const genPid = S.pid, genSid = S.sid;   // generation context snapshot
+  const gen = ++S.genSeq;
 
   pushMsg("user", esc(text));
-  const live = pushMsg("assistant thinking", "opencode is thinking… <span class=\"elapsed\"></span>");
+  const live = pushMsg("assistant thinking",
+    `<span class="role">assistant</span><span class="thinking">thinking<span class="dots"><i></i><i></i><i></i></span></span> <span class="elapsed"></span>`);
   const elapsedEl = live.querySelector(".elapsed");
   const t0 = Date.now();
 
   const body = { parts: [{ type: "text", text }] };
   if (S.model) body.model = S.model;
+  const chatBody = () => oc(`/session/${genSid}/message?limit=1`);
 
   try {
     S.busy = true;
     S.abortReq = false;
     updateSendBtn();
-    const base = await oc(`/session/${S.sid}/message?limit=1`);
+    const base = await chatBody();
     const baseId = base[0]?.info?.id;
-    await oc(`/session/${S.sid}/prompt_async`, { method: "POST", body });
+    await oc(`/session/${genSid}/prompt_async`, { method: "POST", body });
 
     const paint = (m) => {
       const html = (m.parts || []).map(partHtml).join("");
@@ -650,9 +684,11 @@ async function sendPrompt(text, retryOf = false) {
     let warned = false, painted = false;
     for (;;) {
       await new Promise((r) => setTimeout(r, 800));
+      // User switched project/session mid-generation: stop driving a dead context.
+      if (S.genSeq !== gen || S.pid !== genPid || S.sid !== genSid) return;
       elapsedEl.textContent = `(${Math.round((Date.now() - t0) / 1000)}s)`;
       let last = null;
-      try { last = (await oc(`/session/${S.sid}/message?limit=1`))[0]; } catch {}
+      try { last = (await chatBody())[0]; } catch {}
       const isNew = last && baseId && last.info?.id !== baseId;
 
       if (isNew && last.info?.role === "assistant") {
@@ -665,7 +701,7 @@ async function sendPrompt(text, retryOf = false) {
       const waited = Date.now() - t0;
       if (!isNew && waited > 20000 && !warned) {
         warned = true;
-        live.innerHTML = `Still waiting for opencode… <span class="elapsed"></span>`;
+        live.innerHTML = `<span class="role">assistant</span><span class="thinking">still waiting for the engine<span class="dots"><i></i><i></i><i></i></span></span> <span class="elapsed">${Math.round(waited / 1000)}s</span>`;
       }
       if (!isNew && waited > 90000) {
         live.className = "msg assistant";
@@ -679,15 +715,23 @@ async function sendPrompt(text, retryOf = false) {
       }
       if (S.abortReq) { await new Promise((r) => setTimeout(r, 1500)); break; }
     }
-    if (painted) updateCtxBar(await oc(`/session/${S.sid}/message?limit=1`).catch(() => []));
-    await renderChat(true);
+    if (painted) updateCtxBar(await chatBody().catch(() => []));
+    if (S.genSeq === gen && S.pid === genPid) await renderChat(true);
   } catch (err) {
-    wait.remove();
+    if (!live.isConnected) return;
+    live.className = "msg assistant";
+    live.innerHTML =
+      `<span class="role">error</span>${esc(err.message || "Request failed")}`;
+    const btn = document.createElement("button");
+    btn.className = "ghost"; btn.style.marginTop = "8px";
+    btn.textContent = retryOf ? "↻ Try again" : "↻ Retry";
+    btn.onclick = () => { live.remove(); sendPrompt(text, true); };
+    live.appendChild(btn);
     toast(err.message, true);
   } finally {
     S.busy = false;
     updateSendBtn();
-    chatScroll().scrollTop = chatScroll().scrollHeight;
+    if (chatScroll()) chatScroll().scrollTop = chatScroll().scrollHeight;
   }
 }
 
@@ -713,7 +757,8 @@ $(".sb-right").addEventListener("click", () =>
 /* ---------------- settings & connection profiles ---------------- */
 
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/ui/sw.js").then((reg) => reg.update()).catch(() => {});
+  // Relative so it works both under the daemon (/ui/) and any mirrored origin.
+  navigator.serviceWorker.register("sw.js").then((reg) => reg.update()).catch(() => {});
 }
 
 let sseSource = null;
@@ -722,7 +767,12 @@ function initSSE() {
   if (!S.pid) return;
   try {
     const base = getApiBase();
-    sseSource = new EventSource(`${base}/oc/${S.pid}/event`);
+    let url = `${base}/oc/${S.pid}/event`;
+    const tok = bridgeToken();
+    // EventSource cannot send headers; daemons accept ?token= too.
+    if (tok) url += `?token=${encodeURIComponent(tok)}`;
+    sseSource = new EventSource(url);
+    sseSource.onopen = () => setConn(true);
     sseSource.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
@@ -736,9 +786,9 @@ function initSSE() {
         }
       } catch {}
     };
-    sseSource.onerror = () => {
-      if (sseSource) { sseSource.close(); sseSource = null; }
-    };
+    // Deliberately do not close on error: EventSource retries automatically
+    // (our daemon emits "retry: 4000"), so the connection self-heals.
+    sseSource.onerror = () => setConn(false);
   } catch {}
 }
 
@@ -780,16 +830,31 @@ function applySettings() {
 
 function initSettings() {
   const urlEl = $("#set-url");
+  const tokenEl = $("#set-token");
   urlEl.value = S.url;
+  if (tokenEl) tokenEl.value = localStorage.getItem("of.set.token") || "";
   renderProfiles();
+
+  const reconnect = () => {
+    initSSE();
+    if (S.pid) ensureSession();
+  };
 
   urlEl.addEventListener("change", () => {
     S.url = urlEl.value.trim().replace(/\/$/, "");
     localStorage.setItem("of.set.url", S.url);
     renderProfiles();
     toast(S.url ? "Server URL set — reconnecting" : "Using local bridge");
-    initSSE();
-    if (S.pid) ensureSession();
+    reconnect();
+  });
+
+  $("#btn-save-token")?.addEventListener("click", () => {
+    if (!tokenEl) return;
+    const tok = tokenEl.value.trim();
+    if (tok) localStorage.setItem("of.set.token", tok);
+    else localStorage.removeItem("of.set.token");
+    toast(tok ? "Bridge token saved ✓" : "Bridge token cleared");
+    reconnect();
   });
 
   $("#btn-save-profile")?.addEventListener("click", () => {
@@ -1035,62 +1100,15 @@ $("#term-form")?.addEventListener("submit", async (e) => {
   outBox.scrollTop = outBox.scrollHeight;
 });
 
-/* ---------------- folder browser (import existing project) ---------------- */
+/* ---------------- folder browser (import existing project) ----------------
+   Single implementation. The daemon returns {current, parent,
+   entries:[{name, path, is_dir}]} for /api/browse. */
 
-const BR = { path: "" };
-
-$("#btn-import-project").addEventListener("click", () => openBrowser());
-
-function openBrowser() {
-  $("#browser-overlay").classList.remove("hidden");
-  browseTo("");
-}
-
-async function browseTo(path) {
-  try {
-    const d = await api(`/api/browse?path=${encodeURIComponent(path)}`);
-    BR.path = d.path;
-    $("#browser-path").textContent = d.path;
-    const ul = $("#browser-list");
-    ul.innerHTML = "";
-    if (d.parent !== null && d.parent !== undefined) {
-      const up = document.createElement("li");
-      up.className = "file-entry";
-      up.textContent = "📁 ..";
-      up.onclick = () => browseTo(d.parent);
-      ul.appendChild(up);
-    }
-    if (!d.entries.length)
-      ul.innerHTML += `<li style="color:var(--muted)">No subfolders</li>`;
-    for (const e of d.entries) {
-      const li = document.createElement("li");
-      li.className = "file-entry";
-      li.innerHTML = `<span>📁 ${esc(e.name)}</span>`;
-      li.onclick = () => browseTo(`${d.path}/${e.name}`.replace(/\/+/, "/"));
-      ul.appendChild(li);
-    }
-  } catch (err) { toast(err.message, true); }
-}
-
-$("#browser-up").addEventListener("click", async () => {
-  const d = await api(`/api/browse?path=${encodeURIComponent(BR.path)}`);
-  if (d.parent !== null && d.parent !== undefined) browseTo(d.parent);
-});
-$("#browser-close").addEventListener("click", () =>
-  $("#browser-overlay").classList.add("hidden"));
-
-$("#browser-select").addEventListener("click", async () => {
-  try {
-    const p = await api("/api/projects/import", { method: "POST", body: { path: BR.path } });
-    $("#browser-overlay").classList.add("hidden");
-    await loadProjects(false);
-    S.pid = p.id; S.sid = null;
-    localStorage.setItem("of.pid", p.id);
-    $("#project-select").value = p.id;
-    renderProjectList();
-    ensureSession();
-    toast(`Imported “${p.name}”`);
-  } catch (err) { toast(err.message, true); }
+$("#browser-up").addEventListener("click", () => {
+  if (!BROWSE_PATH) return;
+  api(`/api/browse?path=${encodeURIComponent(BROWSE_PATH)}`)
+    .then((d) => { if (d.parent) loadBrowseDir(d.parent); })
+    .catch((e) => toast(e.message, true));
 });
 
 /* ---------------- git ---------------- */
@@ -1886,6 +1904,8 @@ $("#editor-lsp").addEventListener("click", async () => {
 });
 
 $("#editor-close").addEventListener("click", () => {
+  if (FACTIVE && FACTIVE.dirty &&
+      !confirm(`"${FACTIVE.name}" has unsaved changes. Close anyway?`)) return;
   if (FACTIVE) {
     FTABS.splice(FTABS.indexOf(FACTIVE), 1);
     FACTIVE = FTABS[FTABS.length - 1] || null;
@@ -1936,10 +1956,20 @@ $("#file-search").addEventListener("input", (e) => {
 function setConn(on) { $("#conn-dot").className = `dot ${on ? "on" : "off"}`; }
 
 setInterval(async () => {
+  if (document.hidden) return;   // don't burn battery when backgrounded
   try { await api("/api/health"); setConn(true); } catch { setConn(false); }
 }, 10000);
 
 /* ---------------- boot ---------------- */
+
+// Tap on the dim backdrop of any overlay closes it (replaces inline onclick).
+$$(".overlay-dismiss").forEach((ov) =>
+  ov.addEventListener("click", (e) => {
+    if (e.target === ov) ov.classList.add("hidden");
+  })
+);
+$("#action-close")?.addEventListener("click", () =>
+  $("#action-overlay").classList.add("hidden"));
 
 (async function boot() {
   applySettings();

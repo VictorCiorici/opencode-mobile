@@ -1,7 +1,7 @@
 {
   "name": "OpenForge — opencode mobile IDE",
   "short_name": "OpenForge",
-  "description": "Full mobile IDE suite for opencode running in Termux proot Debian",
+  "description": "Autonomous AI coding agent & mobile IDE for OpenCode — local projects, Git, terminal and LAN AI models",
   "start_url": "/ui/",
   "display": "standalone",
   "background_color": "#0b0e14",
