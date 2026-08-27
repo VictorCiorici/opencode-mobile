@@ -15,6 +15,8 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -26,6 +28,7 @@ public class MainActivity extends Activity {
     private static final String PREFS = "openforge";
     private static final String KEY_URL = "bridge_url";
     private static final String DEFAULT_URL = "http://127.0.0.1:8787/ui/";
+    private static final String LOCAL_ASSET_URL = "file:///android_asset/web/index.html";
     private static final int FILE_CHOOSER_REQ = 1001;
 
     private WebView web;
@@ -68,6 +71,8 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
         s.setAllowFileAccess(true);
+        s.setAllowFileAccessFromFileURLs(true);
+        s.setAllowUniversalAccessFromFileURLs(true);
         s.setMediaPlaybackRequiresUserGesture(false);
 
         web.setWebViewClient(new WebViewClient() {
@@ -77,6 +82,22 @@ public class MainActivity extends Activity {
                     loaded = true;
                     splashView.setVisibility(View.GONE);
                 }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request.isForMainFrame()) {
+                    // Fall back cleanly to bundled local assets instead of showing browser error page
+                    view.loadUrl(LOCAL_ASSET_URL);
+                    if (splashView != null) splashView.setVisibility(View.GONE);
+                }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                // Compatibility for older Android APIs
+                view.loadUrl(LOCAL_ASSET_URL);
+                if (splashView != null) splashView.setVisibility(View.GONE);
             }
         });
 
@@ -122,11 +143,11 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        // Long-press to change the bridge URL (e.g. an SSH-tunneled host).
+        // Long-press to change the bridge URL
         web.setOnLongClickListener(v -> {
             android.app.AlertDialog.Builder d = new android.app.AlertDialog.Builder(this);
             final android.widget.EditText input = new android.widget.EditText(this);
-            input.setText(url);
+            input.setText(sp.getString(KEY_URL, DEFAULT_URL));
             d.setTitle("OpenForge bridge URL").setView(input)
               .setPositiveButton("Save", (dialog, which) -> {
                   String u = input.getText().toString().trim();
@@ -144,18 +165,19 @@ public class MainActivity extends Activity {
     private void waitForServerAndLoad(String targetUrl) {
         new Thread(() -> {
             boolean ready = false;
-            for (int i = 0; i < 30; i++) {
+            for (int i = 0; i < 15; i++) {
                 if (ProcessManager.isServerHealthy("http://127.0.0.1:8787/api/health")) {
                     ready = true;
                     break;
                 }
-                try { Thread.sleep(400); } catch (Exception ignored) {}
+                try { Thread.sleep(300); } catch (Exception ignored) {}
             }
+            final String finalUrl = ready ? targetUrl : LOCAL_ASSET_URL;
             handler.post(() -> {
-                web.loadUrl(targetUrl);
+                web.loadUrl(finalUrl);
                 handler.postDelayed(() -> {
                     if (splashView != null) splashView.setVisibility(View.GONE);
-                }, 1500);
+                }, 1000);
             });
         }).start();
     }
