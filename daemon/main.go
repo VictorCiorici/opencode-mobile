@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -1003,6 +1004,37 @@ func handleRegisterLocal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "config": fullCfg})
 }
 
+func getFallbackOpenCodeModels() map[string]interface{} {
+	return map[string]interface{}{
+		"opencode": map[string]interface{}{
+			"id":   "opencode",
+			"name": "OpenCode Zen",
+			"models": map[string]interface{}{
+				"claude-3-7-sonnet":    map[string]interface{}{"name": "Claude 3.7 Sonnet (Thinking)"},
+				"claude-3-5-sonnet":    map[string]interface{}{"name": "Claude 3.5 Sonnet"},
+				"claude-3-5-haiku":     map[string]interface{}{"name": "Claude 3.5 Haiku"},
+				"gemini-2.5-pro":       map[string]interface{}{"name": "Gemini 2.5 Pro"},
+				"gemini-2.5-flash":     map[string]interface{}{"name": "Gemini 2.5 Flash"},
+				"gpt-4o":               map[string]interface{}{"name": "GPT-4o"},
+				"o3-mini":              map[string]interface{}{"name": "o3-mini"},
+				"deepseek-r1":          map[string]interface{}{"name": "DeepSeek R1 (Reasoning)"},
+				"deepseek-v3":          map[string]interface{}{"name": "DeepSeek V3"},
+				"qwen-2.5-coder":       map[string]interface{}{"name": "Qwen 2.5 Coder"},
+				"glm-4.7":              map[string]interface{}{"name": "GLM 4.7"},
+				"minimax-m3":           map[string]interface{}{"name": "MiniMax M3"},
+			},
+		},
+		"google": map[string]interface{}{
+			"id":   "google",
+			"name": "Google Gemini",
+			"models": map[string]interface{}{
+				"gemini-2.5-pro":   map[string]interface{}{"name": "Gemini 2.5 Pro"},
+				"gemini-2.5-flash": map[string]interface{}{"name": "Gemini 2.5 Flash"},
+			},
+		},
+	}
+}
+
 func fetchLiveOpenCodeModels() map[string]interface{} {
 	cachePath := filepath.Join(cfg.DataDir, "models_cache.json")
 
@@ -1024,7 +1056,11 @@ func fetchLiveOpenCodeModels() map[string]interface{} {
 	if err == nil {
 		json.Unmarshal(b, &cachedData)
 	}
-	return cachedData
+	if len(cachedData) > 0 {
+		return cachedData
+	}
+
+	return getFallbackOpenCodeModels()
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -1178,13 +1214,16 @@ func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	nameOut, _ := exec.Command("git", "config", "--global", "user.name").Output()
 	emailOut, _ := exec.Command("git", "config", "--global", "user.email").Output()
 
+	opencodeFound := findOpenCodeBinary() != ""
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"opencode":  map[string]interface{}{"configured": opencodeToken != "", "preview": mask(opencodeToken)},
-		"github":    map[string]interface{}{"configured": githubToken != "", "preview": mask(githubToken)},
-		"git_user":  map[string]string{"name": strings.TrimSpace(string(nameOut)), "email": strings.TrimSpace(string(emailOut))},
-		"gemini":    map[string]interface{}{"configured": os.Getenv("GEMINI_API_KEY") != "", "preview": mask(os.Getenv("GEMINI_API_KEY"))},
-		"openai":    map[string]interface{}{"configured": os.Getenv("OPENAI_API_KEY") != "", "preview": mask(os.Getenv("OPENAI_API_KEY"))},
-		"anthropic": map[string]interface{}{"configured": os.Getenv("ANTHROPIC_API_KEY") != "", "preview": mask(os.Getenv("ANTHROPIC_API_KEY"))},
+		"opencode":       map[string]interface{}{"configured": opencodeToken != "", "preview": mask(opencodeToken)},
+		"github":         map[string]interface{}{"configured": githubToken != "", "preview": mask(githubToken)},
+		"git_user":       map[string]string{"name": strings.TrimSpace(string(nameOut)), "email": strings.TrimSpace(string(emailOut))},
+		"gemini":         map[string]interface{}{"configured": os.Getenv("GEMINI_API_KEY") != "", "preview": mask(os.Getenv("GEMINI_API_KEY"))},
+		"openai":         map[string]interface{}{"configured": os.Getenv("OPENAI_API_KEY") != "", "preview": mask(os.Getenv("OPENAI_API_KEY"))},
+		"anthropic":      map[string]interface{}{"configured": os.Getenv("ANTHROPIC_API_KEY") != "", "preview": mask(os.Getenv("ANTHROPIC_API_KEY"))},
+		"opencode_local": opencodeFound,
 	})
 }
 
@@ -1265,18 +1304,32 @@ func handleSettingsWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ---------------------------------------------------- OpenCode Proxy & Session Engine ---
+// ---------------------------------------------------- OpenCode Proxy & Standalone AI ---
 
-type Session struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"createdAt"`
+type MsgInfo struct {
+	ID         string                 `json:"id"`
+	SessionID  string                 `json:"sessionID,omitempty"`
+	Role       string                 `json:"role"`
+	ModelID    string                 `json:"modelID,omitempty"`
+	ProviderID string                 `json:"providerID,omitempty"`
+	Cost       float64                `json:"cost,omitempty"`
+	Tokens     map[string]interface{} `json:"tokens,omitempty"`
+	Time       map[string]interface{} `json:"time,omitempty"`
 }
 
-type Message struct {
+type MsgPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type SessionMsg struct {
+	Info  MsgInfo   `json:"info"`
+	Parts []MsgPart `json:"parts"`
+}
+
+type SessionRecord struct {
 	ID        string    `json:"id"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
+	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -1288,34 +1341,83 @@ func getMessagesFilePath(pid, sid string) string {
 	return filepath.Join(cfg.DataDir, fmt.Sprintf("msgs_%s_%s.json", pid, sid))
 }
 
-func loadSessions(pid string) []Session {
-	var list []Session
+func loadSessions(pid string) []SessionRecord {
+	var list []SessionRecord
 	b, _ := os.ReadFile(getSessionFilePath(pid))
 	json.Unmarshal(b, &list)
 	if list == nil {
-		list = []Session{}
+		list = []SessionRecord{}
 	}
 	return list
 }
 
-func saveSessions(pid string, list []Session) {
+func saveSessions(pid string, list []SessionRecord) {
 	b, _ := json.MarshalIndent(list, "", "  ")
 	os.WriteFile(getSessionFilePath(pid), b, 0644)
 }
 
-func loadMessages(pid, sid string) []Message {
-	var list []Message
+func loadMessages(pid, sid string) []SessionMsg {
+	var list []SessionMsg
 	b, _ := os.ReadFile(getMessagesFilePath(pid, sid))
 	json.Unmarshal(b, &list)
 	if list == nil {
-		list = []Message{}
+		list = []SessionMsg{}
 	}
 	return list
 }
 
-func saveMessages(pid, sid string, list []Message) {
+func saveMessages(pid, sid string, list []SessionMsg) {
 	b, _ := json.MarshalIndent(list, "", "  ")
 	os.WriteFile(getMessagesFilePath(pid, sid), b, 0644)
+}
+
+func executeAICall(zenToken, model, prompt string) string {
+	if zenToken == "" {
+		return "⚠️ **OpenCode Zen Token Not Set**\n\nPlease go to **Settings ⚙️ ➔ AI Credentials & API Keys** and paste your OpenCode Zen Key (`zen_live_...`) to enable full AI coding and reasoning capabilities."
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "system", "content": "You are OpenForge AI, an expert mobile software engineer."},
+			{"role": "user", "content": prompt},
+		},
+	})
+
+	req, err := http.NewRequest("POST", "https://opencode.ai/api/v1/chat/completions", bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Sprintf("Request creation error: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+zenToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Sprintf("Network error contacting OpenCode API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var respJSON struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	json.Unmarshal(bodyBytes, &respJSON)
+
+	if respJSON.Error.Message != "" {
+		return fmt.Sprintf("OpenCode API Error: %s", respJSON.Error.Message)
+	}
+	if len(respJSON.Choices) > 0 {
+		return respJSON.Choices[0].Message.Content
+	}
+	return string(bodyBytes)
 }
 
 func handleOpenCode(w http.ResponseWriter, r *http.Request) {
@@ -1339,7 +1441,7 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Standalone fallback: Handle Sessions, Messages & SSE stream directly in daemon
+	// 2. Standalone fallback: Handle Sessions, Messages & AI execution directly
 	action := ""
 	if len(parts) >= 2 {
 		action = parts[1]
@@ -1368,8 +1470,8 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 			}
 			if r.Method == http.MethodPost {
 				sid := fmt.Sprintf("ses_%d", time.Now().UnixMilli())
-				s := Session{ID: sid, Title: "New Session", CreatedAt: time.Now()}
-				list := append([]Session{s}, loadSessions(pid)...)
+				s := SessionRecord{ID: sid, Title: "New Session", CreatedAt: time.Now()}
+				list := append([]SessionRecord{s}, loadSessions(pid)...)
 				saveSessions(pid, list)
 				writeJSON(w, http.StatusOK, s)
 				return
@@ -1403,18 +1505,68 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			msgs := loadMessages(pid, sid)
-			userMsg := Message{ID: fmt.Sprintf("msg_%d", time.Now().UnixMilli()), Role: "user", Content: userText, CreatedAt: time.Now()}
-			msgs = append(msgs, userMsg)
-
-			aiMsg := Message{
-				ID:        fmt.Sprintf("msg_%d", time.Now().UnixMilli()+1),
-				Role:      "assistant",
-				Content:   fmt.Sprintf("Response for project `%s` using `%s/%s`:\n\n%s", pid, req.Model.ProviderID, req.Model.ModelID, userText),
-				CreatedAt: time.Now(),
+			now := time.Now().UnixMilli()
+			userMsg := SessionMsg{
+				Info: MsgInfo{
+					ID:        fmt.Sprintf("msg_usr_%d", now),
+					SessionID: sid,
+					Role:      "user",
+					Time:      map[string]interface{}{"created": now, "completed": now},
+				},
+				Parts: []MsgPart{{Type: "text", Text: userText}},
 			}
-			msgs = append(msgs, aiMsg)
+
+			asstMsgID := fmt.Sprintf("msg_ast_%d", now+1)
+			asstMsg := SessionMsg{
+				Info: MsgInfo{
+					ID:         asstMsgID,
+					SessionID:  sid,
+					Role:       "assistant",
+					ModelID:    req.Model.ModelID,
+					ProviderID: req.Model.ProviderID,
+					Time:       map[string]interface{}{"created": now},
+				},
+				Parts: []MsgPart{{Type: "text", Text: "Connecting to OpenCode AI engine…"}},
+			}
+
+			msgs := loadMessages(pid, sid)
+			msgs = append(msgs, userMsg, asstMsg)
 			saveMessages(pid, sid, msgs)
+
+			// Execute AI completion in background goroutine
+			go func() {
+				home, _ := os.UserHomeDir()
+				authPath := filepath.Join(home, ".local/share/opencode/auth.json")
+				var authData map[string]map[string]interface{}
+				b, _ := os.ReadFile(authPath)
+				json.Unmarshal(b, &authData)
+
+				zenToken := ""
+				if authData != nil && authData["opencode"] != nil {
+					zenToken, _ = authData["opencode"]["token"].(string)
+				}
+
+				model := req.Model.ModelID
+				if model == "" {
+					model = "claude-3-7-sonnet"
+				}
+
+				reply := executeAICall(zenToken, model, userText)
+				compTime := time.Now().UnixMilli()
+
+				all := loadMessages(pid, sid)
+				for i := range all {
+					if all[i].Info.ID == asstMsgID {
+						all[i].Parts = []MsgPart{{Type: "text", Text: reply}}
+						all[i].Info.Time["completed"] = compTime
+						all[i].Info.Tokens = map[string]interface{}{
+							"input":  len(userText) / 4,
+							"output": len(reply) / 4,
+						}
+					}
+				}
+				saveMessages(pid, sid, all)
+			}()
 
 			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "sessionID": sid})
 			return
