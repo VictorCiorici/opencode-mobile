@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +29,9 @@ type Config struct {
 }
 
 var (
-	cfg  Config
-	lock sync.Mutex
+	cfg     Config
+	lock    sync.Mutex
+	instMgr *Manager
 )
 
 func main() {
@@ -51,6 +53,8 @@ func main() {
 
 	os.MkdirAll(cfg.WorkspaceDir, 0755)
 	os.MkdirAll(cfg.DataDir, 0755)
+
+	instMgr = NewManager()
 
 	mux := http.NewServeMux()
 
@@ -81,7 +85,7 @@ func main() {
 	mux.HandleFunc("/api/auth/token", handleAuthToken)
 	mux.HandleFunc("/api/settings/workspace", handleSettingsWorkspace)
 
-	// OpenCode Proxy / Native Session Handler
+	// OpenCode Proxy to Project Instance
 	mux.HandleFunc("/oc/", handleOpenCode)
 
 	// Static Web UI
@@ -130,13 +134,125 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// ------------------------------------------------------------- Instances ---
+
+type Instance struct {
+	PID      string
+	Path     string
+	Port     int
+	Cmd      *exec.Cmd
+	LastUsed time.Time
+}
+
+type Manager struct {
+	mu        sync.Mutex
+	instances map[string]*Instance
+	nextPort  int
+}
+
+func NewManager() *Manager {
+	return &Manager{
+		instances: make(map[string]*Instance),
+		nextPort:  4100,
+	}
+}
+
+func findOpenCodeBinary() string {
+	candidates := []string{
+		"/usr/local/bin/opencode",
+		"/data/data/com.termux/files/usr/bin/opencode",
+		"/data/data/com.openforge/files/bin/opencode",
+	}
+	home, _ := os.UserHomeDir()
+	candidates = append(candidates, filepath.Join(home, ".local/bin/opencode"))
+
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	if p, err := exec.LookPath("opencode"); err == nil {
+		return p
+	}
+	return ""
+}
+
+func (m *Manager) Get(pid string) (*Instance, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if inst, ok := m.instances[pid]; ok {
+		if inst.Cmd != nil && inst.Cmd.Process != nil && isPortHealthy(inst.Port) {
+			inst.LastUsed = time.Now()
+			return inst, nil
+		}
+	}
+
+	proj := findProject(pid)
+	if proj == nil {
+		return nil, fmt.Errorf("project '%s' not found", pid)
+	}
+
+	opencodeBin := findOpenCodeBinary()
+	if opencodeBin == "" {
+		return nil, fmt.Errorf("opencode binary not found")
+	}
+
+	port := m.nextPort
+	m.nextPort++
+
+	cmd := exec.Command(opencodeBin, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
+	cmd.Dir = proj.Path
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start opencode for '%s': %w", pid, err)
+	}
+
+	inst := &Instance{
+		PID:      pid,
+		Path:     proj.Path,
+		Port:     port,
+		Cmd:      cmd,
+		LastUsed: time.Now(),
+	}
+	m.instances[pid] = inst
+
+	// Wait up to 15s for opencode instance to report healthy
+	go func() {
+		cmd.Wait()
+	}()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if isPortHealthy(port) {
+			return inst, nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	return inst, nil
+}
+
+func isPortHealthy(port int) bool {
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/global/health", port))
+	if err == nil && resp.StatusCode == 200 {
+		resp.Body.Close()
+		return true
+	}
+	return false
+}
+
 // ---------------------------------------------------------------- Health ---
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
+	opencodeFound := findOpenCodeBinary() != ""
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"bridge": "ok",
 		"opencode": map[string]interface{}{
-			"healthy": true,
+			"healthy": opencodeFound,
 			"version": "native-go-v0.2.0",
 		},
 	})
@@ -778,7 +894,6 @@ func handleRegisterLocal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "config": fullCfg})
 }
 
-// Fetch live models dynamically from models.dev (OpenCode's official live models registry)
 func fetchLiveOpenCodeModels() map[string]interface{} {
 	cachePath := filepath.Join(cfg.DataDir, "models_cache.json")
 
@@ -795,7 +910,6 @@ func fetchLiveOpenCodeModels() map[string]interface{} {
 		resp.Body.Close()
 	}
 
-	// Fallback to cached copy
 	var cachedData map[string]interface{}
 	b, err := os.ReadFile(cachePath)
 	if err == nil {
@@ -805,15 +919,22 @@ func fetchLiveOpenCodeModels() map[string]interface{} {
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
-	// If opencode serve is alive on :4100, proxy directly to it
-	if isOpenCodeAlive() {
-		target, _ := url.Parse("http://127.0.0.1:4100")
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		r.URL.Path = "/provider"
-		proxy.ServeHTTP(w, r)
-		return
+	pid := strings.TrimPrefix(r.URL.Path, "/api/models/")
+	pid = strings.TrimSpace(pid)
+
+	// If a project is specified, try to query the running local OpenCode instance for that project!
+	if pid != "" && pid != "global" && pid != "default" {
+		inst, err := instMgr.Get(pid)
+		if err == nil && inst != nil {
+			target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			r.URL.Path = "/config/providers"
+			proxy.ServeHTTP(w, r)
+			return
+		}
 	}
 
+	// Fallback: Return live OpenCode models from models.dev and local opencode.json
 	home, _ := os.UserHomeDir()
 	cfgPath := filepath.Join(home, ".config/opencode/opencode.json")
 
@@ -831,10 +952,8 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	var list []ProvInfo
 
-	// Fetch dynamic models from OpenCode models directory
 	allLiveProviders := fetchLiveOpenCodeModels()
 
-	// 1. Dynamic OpenCode Zen models from models.dev
 	if opencodeLive, ok := allLiveProviders["opencode"].(map[string]interface{}); ok {
 		name, _ := opencodeLive["name"].(string)
 		if name == "" {
@@ -844,7 +963,6 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		list = append(list, ProvInfo{ID: "opencode", Name: name, Models: mMap})
 	}
 
-	// 2. Google Gemini models from models.dev
 	if googleLive, ok := allLiveProviders["google"].(map[string]interface{}); ok {
 		name, _ := googleLive["name"].(string)
 		if name == "" {
@@ -854,7 +972,6 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		list = append(list, ProvInfo{ID: "google", Name: name, Models: mMap})
 	}
 
-	// 3. Other standard providers from models.dev
 	for _, provID := range []string{"anthropic", "openai", "deepseek"} {
 		if provLive, ok := allLiveProviders[provID].(map[string]interface{}); ok {
 			name, _ := provLive["name"].(string)
@@ -866,7 +983,6 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 4. User configured custom providers from opencode.json (Ollama, LM Studio, etc.)
 	providersMap, _ := fullCfg["provider"].(map[string]interface{})
 	for id, p := range providersMap {
 		if id == "opencode" || id == "google" || id == "anthropic" || id == "openai" || id == "deepseek" {
@@ -1013,166 +1129,27 @@ func handleSettingsWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ---------------------------------------------------- OpenCode / Chat ---
-
-type Session struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
-type Message struct {
-	ID        string    `json:"id"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
-func getSessionFilePath(pid string) string {
-	return filepath.Join(cfg.DataDir, fmt.Sprintf("sessions_%s.json", pid))
-}
-
-func getMessagesFilePath(pid, sid string) string {
-	return filepath.Join(cfg.DataDir, fmt.Sprintf("msgs_%s_%s.json", pid, sid))
-}
-
-func loadSessions(pid string) []Session {
-	var list []Session
-	b, _ := os.ReadFile(getSessionFilePath(pid))
-	json.Unmarshal(b, &list)
-	if list == nil {
-		list = []Session{}
-	}
-	return list
-}
-
-func saveSessions(pid string, list []Session) {
-	b, _ := json.MarshalIndent(list, "", "  ")
-	os.WriteFile(getSessionFilePath(pid), b, 0644)
-}
-
-func loadMessages(pid, sid string) []Message {
-	var list []Message
-	b, _ := os.ReadFile(getMessagesFilePath(pid, sid))
-	json.Unmarshal(b, &list)
-	if list == nil {
-		list = []Message{}
-	}
-	return list
-}
-
-func saveMessages(pid, sid string, list []Message) {
-	b, _ := json.MarshalIndent(list, "", "  ")
-	os.WriteFile(getMessagesFilePath(pid, sid), b, 0644)
-}
-
-func isOpenCodeAlive() bool {
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:4100", 150*time.Millisecond)
-	if err == nil {
-		conn.Close()
-		return true
-	}
-	return false
-}
+// ---------------------------------------------------- OpenCode Proxy ---
 
 func handleOpenCode(w http.ResponseWriter, r *http.Request) {
-	// If opencode serve is running on :4100, proxy directly to it
-	if isOpenCodeAlive() {
-		target, _ := url.Parse("http://127.0.0.1:4100")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/oc/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.Error(w, "Project ID required in /oc/{pid}/...", http.StatusBadRequest)
+		return
+	}
+	pid := parts[0]
+	rest := "/" + strings.Join(parts[1:], "/")
+
+	inst, err := instMgr.Get(pid)
+	if err == nil && inst != nil {
+		target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
 		proxy := httputil.NewSingleHostReverseProxy(target)
+		r.URL.Path = rest
 		proxy.ServeHTTP(w, r)
 		return
 	}
 
-	// Standalone fallback: Handle Sessions, Messages & AI Streaming natively
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/oc/"), "/")
-	if len(parts) < 2 {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
-	pid := parts[0]
-	action := parts[1]
-
-	// SSE event stream
-	if action == "event" {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-		fmt.Fprintf(w, "data: {\"type\":\"connected\"}\n\n")
-		flusher.Flush()
-		<-r.Context().Done()
-		return
-	}
-
-	// Session Management
-	if action == "session" {
-		if len(parts) == 2 {
-			if r.Method == http.MethodGet {
-				writeJSON(w, http.StatusOK, loadSessions(pid))
-				return
-			}
-			if r.Method == http.MethodPost {
-				sid := fmt.Sprintf("ses_%d", time.Now().UnixMilli())
-				s := Session{ID: sid, Title: "New Session", CreatedAt: time.Now()}
-				list := append([]Session{s}, loadSessions(pid)...)
-				saveSessions(pid, list)
-				writeJSON(w, http.StatusOK, s)
-				return
-			}
-		}
-
-		sid := parts[2]
-		if len(parts) == 4 && parts[3] == "message" {
-			if r.Method == http.MethodGet {
-				writeJSON(w, http.StatusOK, loadMessages(pid, sid))
-				return
-			}
-		}
-
-		if len(parts) == 4 && parts[3] == "prompt_async" && r.Method == http.MethodPost {
-			var req struct {
-				Parts []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"parts"`
-				Model struct {
-					ProviderID string `json:"providerID"`
-					ModelID    string `json:"modelID"`
-				} `json:"model"`
-			}
-			json.NewDecoder(r.Body).Decode(&req)
-			userText := ""
-			for _, p := range req.Parts {
-				if p.Type == "text" {
-					userText += p.Text
-				}
-			}
-
-			msgs := loadMessages(pid, sid)
-			userMsg := Message{ID: fmt.Sprintf("msg_%d", time.Now().UnixMilli()), Role: "user", Content: userText, CreatedAt: time.Now()}
-			msgs = append(msgs, userMsg)
-
-			// Simple AI Response or Echo
-			aiMsg := Message{
-				ID:        fmt.Sprintf("msg_%d", time.Now().UnixMilli()+1),
-				Role:      "assistant",
-				Content:   fmt.Sprintf("I received your message for project `%s` using `%s/%s`:\n\n%s", pid, req.Model.ProviderID, req.Model.ModelID, userText),
-				CreatedAt: time.Now(),
-			}
-			msgs = append(msgs, aiMsg)
-			saveMessages(pid, sid, msgs)
-
-			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "sessionID": sid})
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	http.Error(w, fmt.Sprintf("OpenCode instance error for '%s': %v", pid, err), http.StatusServiceUnavailable)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {

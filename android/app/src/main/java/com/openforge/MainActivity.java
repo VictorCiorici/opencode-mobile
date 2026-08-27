@@ -61,6 +61,10 @@ public class MainActivity extends Activity {
 
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
         String url = sp.getString(KEY_URL, DEFAULT_URL);
+        if (url == null || url.startsWith("file://") || url.isEmpty()) {
+            url = DEFAULT_URL;
+            sp.edit().putString(KEY_URL, DEFAULT_URL).apply();
+        }
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF0B0E14);
@@ -148,20 +152,17 @@ public class MainActivity extends Activity {
 
     private void waitForServerAndLoad(String targetUrl) {
         new Thread(() -> {
-            boolean ready = false;
-            for (int i = 0; i < 35; i++) {
+            for (int i = 0; i < 40; i++) {
                 if (ProcessManager.isServerHealthy("http://127.0.0.1:8787/api/health")) {
-                    ready = true;
                     break;
                 }
-                try { Thread.sleep(300); } catch (Exception ignored) {}
+                try { Thread.sleep(200); } catch (Exception ignored) {}
             }
-            final String finalUrl = ready ? targetUrl : LOCAL_ASSET_URL;
             handler.post(() -> {
-                web.loadUrl(finalUrl);
+                web.loadUrl(targetUrl);
                 handler.postDelayed(() -> {
                     if (splashView != null) splashView.setVisibility(View.GONE);
-                }, 600);
+                }, 400);
             });
         }).start();
     }
