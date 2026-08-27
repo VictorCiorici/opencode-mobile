@@ -22,6 +22,7 @@ public class RuntimeInstaller {
         try {
             copyAssetFolder(context.getAssets(), "server", new File(targetDir, "server"));
             copyAssetFolder(context.getAssets(), "web", new File(targetDir, "pwa"));
+            copyAssetFolder(context.getAssets(), "bin", new File(targetDir, "bin"));
             
             // Check for zipped runtime bundle (e.g., runtime-arm64.zip)
             try (InputStream zipIn = context.getAssets().open("runtime-arm64.zip")) {

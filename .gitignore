@@ -5,3 +5,4 @@ venv/
 nohup.out
 *.log
 .DS_Store
+apk/
