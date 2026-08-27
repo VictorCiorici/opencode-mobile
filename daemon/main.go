@@ -38,6 +38,7 @@ type Config struct {
 	WebDir       string
 	Token        string
 	Version      string
+	OpenCodeBin  string
 }
 
 var (
@@ -67,6 +68,7 @@ func main() {
 	flag.StringVar(&cfg.WebDir, "web", "", "Web static directory")
 	flag.StringVar(&cfg.Token, "token", os.Getenv("OCMB_TOKEN"), "Require bearer token for API access (empty disables auth)")
 	flag.StringVar(&cfg.Version, "version", daemonVersion, "Daemon version reported via /api/health")
+	flag.StringVar(&cfg.OpenCodeBin, "opencode", os.Getenv("OCMB_OPENCODE_BIN"), "Path to the bundled opencode engine binary")
 	flag.Parse()
 
 	os.MkdirAll(cfg.WorkspaceDir, 0755)
@@ -338,9 +340,20 @@ func NewManager() *Manager {
 }
 
 func findOpenCodeBinary() string {
+	// Explicit host override first (the Android host points this at
+	// nativeLibraryDir/libopencode.so — the only location from which
+	// app-executable W^X policy allows spawning binaries).
+	if cfg.OpenCodeBin != "" {
+		if _, err := os.Stat(cfg.OpenCodeBin); err == nil {
+			return cfg.OpenCodeBin
+		}
+	}
 	candidates := []string{
 		"/usr/local/bin/opencode",
 		"/data/data/com.termux/files/usr/bin/opencode",
+		// /data/data/<pkg>/lib is a symlink to nativeLibraryDir, where the
+		// package installer extracts jniLibs — execution is permitted there.
+		"/data/data/com.openforge/lib/libopencode.so",
 		"/data/data/com.openforge/files/bin/opencode",
 	}
 	home, _ := os.UserHomeDir()

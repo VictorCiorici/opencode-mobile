@@ -37,6 +37,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // The bundled opencode engine is a Bun-compiled executable, not a
+            // real shared library — prevent the NDK strip step from touching it.
+            doNotStrip "**/libopencode.so"
         }
     }
     buildFeatures { viewBinding false }

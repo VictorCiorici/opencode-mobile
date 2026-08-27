@@ -42,17 +42,15 @@ jobs:
           cd ..
           ls -lh android/app/src/main/jniLibs/arm64-v8a/libdaemon.so android/app/src/main/assets/bin/openforge-daemon
 
-      - name: Bundle opencode engine (arm64 musl, self-sufficient subscriptions)
+      - name: Bundle opencode engine (arm64 musl → jniLibs)
         run: |
-          mkdir -p /tmp/oc /tmp/ziproot/bin
+          mkdir -p /tmp/oc android/app/src/main/jniLibs/arm64-v8a
           curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64-musl.tar.gz -o /tmp/oc.tar.gz
           tar -xzf /tmp/oc.tar.gz -C /tmp/oc
           BIN=$(find /tmp/oc -type f -name opencode | head -1)
           test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }
-          cp "$BIN" /tmp/ziproot/bin/opencode
-          chmod 755 /tmp/ziproot/bin/opencode
-          (cd /tmp/ziproot && zip -qr "$GITHUB_WORKSPACE/android/app/src/main/assets/runtime-arm64.zip" bin)
-          ls -lh android/app/src/main/assets/runtime-arm64.zip
+          cp "$BIN" android/app/src/main/jniLibs/arm64-v8a/libopencode.so
+          ls -lh android/app/src/main/jniLibs/arm64-v8a/
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
