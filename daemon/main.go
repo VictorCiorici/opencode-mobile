@@ -62,21 +62,25 @@ func main() {
 	mux.HandleFunc("/api/health", handleHealth)
 	mux.HandleFunc("/health", handleHealth)
 
-	// Projects
+	// Projects & Clone
 	mux.HandleFunc("/projects", handleProjects)
 	mux.HandleFunc("/api/projects", handleProjects)
 	mux.HandleFunc("/projects/import", handleProjectImport)
 	mux.HandleFunc("/api/projects/import", handleProjectImport)
+	mux.HandleFunc("/projects/clone", handleProjectClone)
+	mux.HandleFunc("/api/projects/clone", handleProjectClone)
 	mux.HandleFunc("/projects/", handleProjectOps)
 	mux.HandleFunc("/api/projects/", handleProjectOps)
 
-	// File System
+	// File System & Browse
 	mux.HandleFunc("/fs/", handleFS)
 	mux.HandleFunc("/api/fs/", handleFS)
 	mux.HandleFunc("/api/browse", handleBrowse)
 	mux.HandleFunc("/browse", handleBrowse)
 
-	// Git
+	// Git & Identity
+	mux.HandleFunc("/api/git/config", handleGitGlobalConfig)
+	mux.HandleFunc("/git/config", handleGitGlobalConfig)
 	mux.HandleFunc("/git/", handleGit)
 	mux.HandleFunc("/api/git/", handleGit)
 
@@ -382,6 +386,61 @@ func handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, proj)
 }
 
+func handleProjectClone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		URL    string `json:"url"`
+		Name   string `json:"name"`
+		Branch string `json:"branch"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	gitURL := strings.TrimSpace(req.URL)
+	if gitURL == "" {
+		http.Error(w, "Repository URL required", http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		base := filepath.Base(gitURL)
+		name = strings.TrimSuffix(base, ".git")
+	}
+	pid := slugify(name)
+	if pid == "" {
+		pid = fmt.Sprintf("project-%d", time.Now().Unix())
+	}
+
+	destPath := filepath.Join(getWorkspaceDir(), pid)
+	os.MkdirAll(filepath.Dir(destPath), 0755)
+
+	args := []string{"clone"}
+	if req.Branch != "" {
+		args = append(args, "--branch", strings.TrimSpace(req.Branch))
+	}
+	args = append(args, gitURL, destPath)
+
+	cmd := exec.Command("git", args...)
+	var errOut bytes.Buffer
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		http.Error(w, fmt.Sprintf("Git clone failed: %s %v", errOut.String(), err), http.StatusBadRequest)
+		return
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	reg := readRegistry()
+	proj := Project{ID: pid, Name: name, Path: destPath, Created: true}
+	reg.Projects = append(reg.Projects, proj)
+	writeRegistry(reg)
+
+	writeJSON(w, http.StatusOK, proj)
+}
+
 func handleProjectOps(w http.ResponseWriter, r *http.Request) {
 	pid := strings.TrimPrefix(r.URL.Path, "/api/projects/")
 	pid = strings.TrimPrefix(pid, "/projects/")
@@ -541,6 +600,32 @@ func runGit(dir string, args ...string) (string, error) {
 func isGitRepo(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+func handleGitGlobalConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		nameOut, _ := exec.Command("git", "config", "--global", "user.name").Output()
+		emailOut, _ := exec.Command("git", "config", "--global", "user.email").Output()
+		writeJSON(w, http.StatusOK, map[string]string{
+			"name":  strings.TrimSpace(string(nameOut)),
+			"email": strings.TrimSpace(string(emailOut)),
+		})
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req struct {
+			Name  string `json:"name"`
+			Email string `json:"email"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Name != "" {
+			exec.Command("git", "config", "--global", "user.name", strings.TrimSpace(req.Name)).Run()
+		}
+		if req.Email != "" {
+			exec.Command("git", "config", "--global", "user.email", strings.TrimSpace(req.Email)).Run()
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
 }
 
 func handleGit(w http.ResponseWriter, r *http.Request) {
@@ -946,7 +1031,6 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	pid := strings.TrimPrefix(r.URL.Path, "/api/models/")
 	pid = strings.TrimSpace(pid)
 
-	// If a project is specified, try to query the running local OpenCode instance for that project!
 	if pid != "" && pid != "global" && pid != "default" {
 		inst, err := instMgr.Get(pid)
 		if err == nil && inst != nil {
@@ -958,7 +1042,6 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fallback: Return live OpenCode models from models.dev and local opencode.json
 	home, _ := os.UserHomeDir()
 	cfgPath := filepath.Join(home, ".config/opencode/opencode.json")
 
@@ -1077,6 +1160,11 @@ func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		opencodeToken, _ = authData["opencode"]["token"].(string)
 	}
 
+	githubToken := ""
+	if authData != nil && authData["github"] != nil {
+		githubToken, _ = authData["github"]["token"].(string)
+	}
+
 	mask := func(t string) string {
 		if t == "" {
 			return ""
@@ -1087,8 +1175,13 @@ func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return fmt.Sprintf("%s...%s", t[:4], t[len(t)-4:])
 	}
 
+	nameOut, _ := exec.Command("git", "config", "--global", "user.name").Output()
+	emailOut, _ := exec.Command("git", "config", "--global", "user.email").Output()
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"opencode":  map[string]interface{}{"configured": opencodeToken != "", "preview": mask(opencodeToken)},
+		"github":    map[string]interface{}{"configured": githubToken != "", "preview": mask(githubToken)},
+		"git_user":  map[string]string{"name": strings.TrimSpace(string(nameOut)), "email": strings.TrimSpace(string(emailOut))},
 		"gemini":    map[string]interface{}{"configured": os.Getenv("GEMINI_API_KEY") != "", "preview": mask(os.Getenv("GEMINI_API_KEY"))},
 		"openai":    map[string]interface{}{"configured": os.Getenv("OPENAI_API_KEY") != "", "preview": mask(os.Getenv("OPENAI_API_KEY"))},
 		"anthropic": map[string]interface{}{"configured": os.Getenv("ANTHROPIC_API_KEY") != "", "preview": mask(os.Getenv("ANTHROPIC_API_KEY"))},
@@ -1103,18 +1196,37 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&req)
 
 	home, _ := os.UserHomeDir()
-	if req.ProviderID == "opencode" {
-		authPath := filepath.Join(home, ".local/share/opencode/auth.json")
-		os.MkdirAll(filepath.Dir(authPath), 0755)
-		data := map[string]interface{}{
-			"opencode": map[string]string{
-				"type":  "api",
-				"token": strings.TrimSpace(req.Token),
-			},
-		}
-		b, _ := json.MarshalIndent(data, "", "  ")
-		os.WriteFile(authPath, b, 0644)
+	authPath := filepath.Join(home, ".local/share/opencode/auth.json")
+	os.MkdirAll(filepath.Dir(authPath), 0755)
+
+	var authData map[string]interface{}
+	b, _ := os.ReadFile(authPath)
+	json.Unmarshal(b, &authData)
+	if authData == nil {
+		authData = map[string]interface{}{}
 	}
+
+	tok := strings.TrimSpace(req.Token)
+	if req.ProviderID == "opencode" {
+		authData["opencode"] = map[string]string{
+			"type":  "api",
+			"token": tok,
+		}
+	} else if req.ProviderID == "github" {
+		authData["github"] = map[string]string{
+			"type":  "token",
+			"token": tok,
+		}
+		if tok != "" {
+			credPath := filepath.Join(home, ".git-credentials")
+			credEntry := fmt.Sprintf("https://%s:x-oauth-basic@github.com\nhttps://oauth2:%s@github.com\n", tok, tok)
+			os.WriteFile(credPath, []byte(credEntry), 0600)
+			exec.Command("git", "config", "--global", "credential.helper", "store").Run()
+		}
+	}
+
+	out, _ := json.MarshalIndent(authData, "", "  ")
+	os.WriteFile(authPath, out, 0644)
 
 	handleAuthStatus(w, r)
 }

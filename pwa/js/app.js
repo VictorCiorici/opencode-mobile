@@ -824,6 +824,20 @@ function initSettings() {
         gemTag.style.background = st.gemini?.configured ? "var(--ok)" : "var(--muted)";
         gemTag.style.color = st.gemini?.configured ? "#04291a" : "#fff";
       }
+      const ghTag = $("#auth-tag-github");
+      if (ghTag) {
+        ghTag.textContent = st.github?.configured ? `configured (${st.github.preview})` : "not set";
+        ghTag.style.background = st.github?.configured ? "var(--ok)" : "var(--muted)";
+        ghTag.style.color = st.github?.configured ? "#04291a" : "#fff";
+      }
+      if (st.git_user) {
+        if ($("#git-user-name") && st.git_user.name && !$("#git-user-name").value) {
+          $("#git-user-name").value = st.git_user.name;
+        }
+        if ($("#git-user-email") && st.git_user.email && !$("#git-user-email").value) {
+          $("#git-user-email").value = st.git_user.email;
+        }
+      }
     } catch {}
   }
   // Clipboard paste helpers
@@ -842,7 +856,9 @@ function initSettings() {
   }
   $("#btn-paste-opencode")?.addEventListener("click", () => pasteTo("#key-opencode"));
   $("#btn-paste-gemini")?.addEventListener("click", () => pasteTo("#key-gemini"));
+  $("#btn-paste-github")?.addEventListener("click", () => pasteTo("#key-github"));
   $("#btn-paste-custom")?.addEventListener("click", () => pasteTo("#key-provider-val"));
+  $("#btn-paste-clone-url")?.addEventListener("click", () => pasteTo("#clone-project-url"));
 
   $("#btn-save-opencode-key")?.addEventListener("click", async () => {
     const token = $("#key-opencode").value.trim();
@@ -866,6 +882,28 @@ function initSettings() {
     } catch (e) { toast(e.message, true); }
   });
 
+  $("#btn-save-github-token")?.addEventListener("click", async () => {
+    const token = $("#key-github").value.trim();
+    if (!token) return toast("Enter a GitHub token", true);
+    try {
+      await api("/api/auth/token", { method: "POST", body: { provider_id: "github", token } });
+      $("#key-github").value = "";
+      toast("GitHub Personal Access Token saved ✓");
+      loadAuthStatus();
+    } catch (e) { toast(e.message, true); }
+  });
+
+  $("#btn-save-git-identity")?.addEventListener("click", async () => {
+    const name = $("#git-user-name").value.trim();
+    const email = $("#git-user-email").value.trim();
+    if (!name && !email) return toast("Enter a name or email", true);
+    try {
+      await api("/api/git/config", { method: "POST", body: { name, email } });
+      toast("Git author details saved ✓");
+      loadAuthStatus();
+    } catch (e) { toast(e.message, true); }
+  });
+
   $("#btn-save-custom-key")?.addEventListener("click", async () => {
     const provider_id = $("#key-provider-select").value;
     const token = $("#key-provider-val").value.trim();
@@ -876,6 +914,35 @@ function initSettings() {
       toast(`${provider_id.toUpperCase()} API key saved ✓`);
       loadAuthStatus();
     } catch (e) { toast(e.message, true); }
+  });
+
+  $("#btn-clone-project")?.addEventListener("click", async () => {
+    const url = $("#clone-project-url").value.trim();
+    if (!url) return toast("Enter a Git repository URL", true);
+    const branch = $("#clone-project-branch").value.trim();
+    const btn = $("#btn-clone-project");
+    btn.disabled = true;
+    btn.textContent = "Cloning repository…";
+    try {
+      const p = await api("/api/projects/clone", {
+        method: "POST",
+        body: { url, branch }
+      });
+      $("#clone-project-url").value = "";
+      $("#clone-project-branch").value = "";
+      await loadProjects(false);
+      S.pid = p.id;
+      localStorage.setItem("of.pid", p.id);
+      $("#project-select").value = p.id;
+      renderProjectList();
+      toast(`Cloned “${p.name}” ✓`);
+      ensureSession();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Clone & Open";
+    }
   });
 
   // Default Workspace Directory Management

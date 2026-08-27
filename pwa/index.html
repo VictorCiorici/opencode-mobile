@@ -45,8 +45,23 @@
       <input id="new-project-name" placeholder="New project name…">
       <button id="btn-create-project" class="primary">Create</button>
     </div>
-    <input id="new-project-branch" placeholder="Branch (default: main)" style="margin-bottom:12px">
-    <button id="btn-import-project" class="ghost full import-btn">📂 Import existing folder…</button>
+    <input id="new-project-branch" placeholder="Branch (default: main)" style="margin-bottom:10px">
+
+    <div class="card form-col" style="margin-bottom:12px;background:rgba(255,255,255,0.02)">
+      <div class="card-row" style="margin-bottom:6px">
+        <strong style="font-size:13px">📥 Clone from GitHub / Git URL</strong>
+      </div>
+      <div class="card-row" style="margin-bottom:6px">
+        <input id="clone-project-url" placeholder="https://github.com/owner/repo.git">
+        <button id="btn-paste-clone-url" class="ghost" style="padding:8px 10px" title="Paste URL">📋</button>
+      </div>
+      <div class="card-row" style="margin-bottom:0">
+        <input id="clone-project-branch" placeholder="Branch (default: main)" style="max-width:120px">
+        <button id="btn-clone-project" class="primary full">Clone & Open</button>
+      </div>
+    </div>
+
+    <button id="btn-import-project" class="ghost full import-btn" style="margin-bottom:12px">📂 Import existing folder…</button>
     <ul id="project-list" class="list"></ul>
   </section>
 
@@ -213,6 +228,36 @@
         <button id="btn-paste-custom" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
         <button id="btn-save-custom-key" class="ghost" style="white-space:nowrap">Save</button>
       </div>
+    </div>
+
+    <h3 class="sect">GitHub & Git Identity</h3>
+    <div class="card form-col" style="margin-bottom:12px">
+      <div class="card-row" style="margin-bottom:6px">
+        <label style="font-weight:600;font-size:13px">GitHub Personal Access Token (PAT)</label>
+        <span id="auth-tag-github" class="server-badge" style="background:var(--muted)">not set</span>
+      </div>
+      <div class="card-row" style="margin-bottom:10px">
+        <input id="key-github" type="password" placeholder="ghp_... or github_pat_...">
+        <button id="btn-paste-github" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
+        <button id="btn-save-github-token" class="primary" style="white-space:nowrap">Save</button>
+      </div>
+
+      <div class="card-row" style="margin-bottom:6px">
+        <label style="font-weight:600;font-size:13px">Git Author Name</label>
+      </div>
+      <div class="card-row" style="margin-bottom:10px">
+        <input id="git-user-name" placeholder="e.g. Victor Ciorici">
+      </div>
+
+      <div class="card-row" style="margin-bottom:6px">
+        <label style="font-weight:600;font-size:13px">Git Author Email</label>
+      </div>
+      <div class="card-row" style="margin-bottom:10px">
+        <input id="git-user-email" placeholder="e.g. user@example.com">
+      </div>
+
+      <button id="btn-save-git-identity" class="ghost full">Save Git Author Details</button>
+      <small style="color:var(--muted);margin-top:4px">Used for Git commit signatures and HTTPS credentials for private repositories.</small>
     </div>
 
     <h3 class="sect">Default Workspace Directory</h3>
