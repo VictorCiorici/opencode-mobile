@@ -1,10 +1,19 @@
+// OpenForge native daemon: HTTP bridge between the PWA/Android WebView and
+// per-project `opencode serve` instances. Also serves the web UI and a
+// standalone (engine-less) session store so the UI remains usable when the
+// OpenCode binary is not installed on the device.
 package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +36,7 @@ type Config struct {
 	WorkspaceDir string
 	DataDir      string
 	WebDir       string
+	Token        string
 }
 
 var (
@@ -49,12 +60,14 @@ func main() {
 	flag.StringVar(&cfg.WorkspaceDir, "workspace", defaultWs, "Default workspace directory")
 	flag.StringVar(&cfg.DataDir, "data", filepath.Join(home, ".local/share/opencode-mobile"), "Data directory")
 	flag.StringVar(&cfg.WebDir, "web", "", "Web static directory")
+	flag.StringVar(&cfg.Token, "token", os.Getenv("OCMB_TOKEN"), "Require bearer token for API access (empty disables auth)")
 	flag.Parse()
 
 	os.MkdirAll(cfg.WorkspaceDir, 0755)
 	os.MkdirAll(cfg.DataDir, 0755)
 
 	instMgr = NewManager()
+	go instMgr.reapLoop()
 
 	mux := http.NewServeMux()
 
@@ -77,6 +90,10 @@ func main() {
 	mux.HandleFunc("/api/fs/", handleFS)
 	mux.HandleFunc("/api/browse", handleBrowse)
 	mux.HandleFunc("/browse", handleBrowse)
+
+	// Terminal
+	mux.HandleFunc("/api/terminal/", handleTerminal)
+	mux.HandleFunc("/terminal/", handleTerminal)
 
 	// Git & Identity
 	mux.HandleFunc("/api/git/config", handleGitGlobalConfig)
@@ -127,16 +144,16 @@ func main() {
 		mux.Handle("/", fs)
 	}
 
-	handler := corsMiddleware(mux)
+	handler := corsMiddleware(authMiddleware(mux))
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	log.Printf("🚀 OpenForge Native Daemon listening on http://%s (workspace: %s)", addr, cfg.WorkspaceDir)
+	log.Printf("🚀 OpenForge Native Daemon listening on http://%s (workspace: %s, auth: %s)", addr, cfg.WorkspaceDir, map[bool]string{true: "token", false: "off"}[cfg.Token != ""])
 	log.Fatal(http.ListenAndServe(addr, handler))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -144,6 +161,151 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+var apiPrefixes = []string{"/api/", "/git/", "/fs/", "/oc/", "/projects/", "/terminal/"}
+
+func isAPIPath(p string) bool {
+	openPaths := map[string]bool{"/api/health": true, "/health": true}
+	if openPaths[p] {
+		return false
+	}
+	for _, pref := range apiPrefixes {
+		if strings.HasPrefix(p, pref) {
+			return true
+		}
+	}
+	return p == "/projects" || p == "/browse" || p == "/api/browse" || p == "/api/projects" ||
+		p == "/projects/import" || p == "/projects/clone" || p == "/api/projects/import" || p == "/api/projects/clone" ||
+		p == "/git/config" || p == "/api/git/config" ||
+		p == "/api/favorites" || p == "/api/auth/status" || p == "/api/auth/token" ||
+		p == "/api/settings/workspace" || p == "/api/models/scan-lan" || p == "/api/models/probe-host" || p == "/api/models/register-local" ||
+		strings.HasPrefix(p, "/api/models/")
+}
+
+func bearerFromRequest(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	}
+	return r.URL.Query().Get("token")
+}
+
+func checkToken(provided string) bool {
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(cfg.Token)) == 1 {
+		return true
+	}
+	// Constant-time over padded buffers of equal length to avoid length leaks.
+	a := make([]byte, 64)
+	b := make([]byte, 64)
+	copy(a, provided)
+	copy(b, cfg.Token)
+	return subtle.ConstantTimeCompare(a, b) == 1 && len(provided) == len(cfg.Token)
+}
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cfg.Token != "" && isAPIPath(r.URL.Path) {
+			if !checkToken(bearerFromRequest(r)) {
+				writeErr(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// -------------------------------------------------------------- helpers ---
+
+func writeJSON(w http.ResponseWriter, code int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
+}
+
+// writeErr emits a FastAPI-compatible error body ({detail}) that the PWA understands.
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]interface{}{"ok": false, "detail": msg, "error": msg})
+}
+
+func writeOut(w http.ResponseWriter, out string, err error) {
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, strings.TrimSpace(out+" "+errString(err)))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "out": out})
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+type blob map[string]interface{}
+
+func decodeBody(r *http.Request, v interface{}) {
+	b, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil || len(b) == 0 {
+		return
+	}
+	json.Unmarshal(b, v)
+}
+
+// safeJoin resolves rel under root and rejects escapes and symlink traversal.
+func safeJoin(root, rel string) (string, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	full := filepath.Clean(filepath.Join(absRoot, rel))
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		realRoot = absRoot
+	}
+	realFull, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		// Target may not exist yet (write); evaluate the deepest existing parent.
+		dir := filepath.Dir(full)
+		if rd, derr := filepath.EvalSymlinks(dir); derr == nil {
+			realFull = filepath.Join(rd, filepath.Base(full))
+		} else {
+			realFull = full
+		}
+	}
+	for _, r := range []string{realRoot, absRoot} {
+		rel2, rerr := filepath.Rel(r, realFull)
+		if rerr == nil && rel2 != ".." && !strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
+			return full, nil
+		}
+	}
+	return "", fmt.Errorf("path escapes project root")
+}
+
+// safeRef guards git rev / branch arguments against option injection.
+var refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/\-]*$`)
+
+func safeRef(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasPrefix(s, "-") || !refRe.MatchString(s) {
+		return "", fmt.Errorf("invalid reference name: %q", s)
+	}
+	return s, nil
+}
+
+func writeFileSecret(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+	os.Chmod(path, 0600)
+	return nil
+}
+
+func randomToken() string {
+	b := make([]byte, 24)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // ------------------------------------------------------------- Instances ---
@@ -189,25 +351,29 @@ func findOpenCodeBinary() string {
 	return ""
 }
 
+var ErrNoEngine = fmt.Errorf("opencode engine not found")
+
 func (m *Manager) Get(pid string) (*Instance, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if inst, ok := m.instances[pid]; ok {
 		if inst.Cmd != nil && inst.Cmd.Process != nil && isPortHealthy(inst.Port) {
 			inst.LastUsed = time.Now()
+			m.mu.Unlock()
 			return inst, nil
 		}
 	}
 
-	proj := findProject(pid)
-	if proj == nil {
-		return nil, fmt.Errorf("project '%s' not found", pid)
-	}
-
 	opencodeBin := findOpenCodeBinary()
 	if opencodeBin == "" {
-		return nil, fmt.Errorf("opencode binary not found")
+		m.mu.Unlock()
+		return nil, ErrNoEngine
+	}
+
+	proj := findProject(pid)
+	if proj == nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("project '%s' not found", pid)
 	}
 
 	port := m.nextPort
@@ -219,6 +385,7 @@ func (m *Manager) Get(pid string) (*Instance, error) {
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("failed to start opencode for '%s': %w", pid, err)
 	}
 
@@ -230,10 +397,8 @@ func (m *Manager) Get(pid string) (*Instance, error) {
 		LastUsed: time.Now(),
 	}
 	m.instances[pid] = inst
-
-	go func() {
-		cmd.Wait()
-	}()
+	go func() { cmd.Wait() }()
+	m.mu.Unlock()
 
 	deadline := time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
@@ -243,7 +408,43 @@ func (m *Manager) Get(pid string) (*Instance, error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	// Engine never became healthy; drop it so the next attempt retries cleanly.
+	m.mu.Lock()
+	delete(m.instances, pid)
+	m.mu.Unlock()
+	cmd.Process.Kill()
 	return inst, nil
+}
+
+func (m *Manager) Stop(pid string) bool {
+	m.mu.Lock()
+	inst := m.instances[pid]
+	delete(m.instances, pid)
+	m.mu.Unlock()
+	if inst != nil && inst.Cmd != nil && inst.Cmd.Process != nil {
+		inst.Cmd.Process.Kill()
+		return true
+	}
+	return false
+}
+
+func (m *Manager) reapLoop() {
+	for range time.Tick(5 * time.Minute) {
+		m.mu.Lock()
+		var stale []*Instance
+		for pid, inst := range m.instances {
+			if time.Since(inst.LastUsed) > 30*time.Minute {
+				stale = append(stale, inst)
+				delete(m.instances, pid)
+			}
+		}
+		m.mu.Unlock()
+		for _, inst := range stale {
+			if inst.Cmd != nil && inst.Cmd.Process != nil {
+				inst.Cmd.Process.Kill()
+			}
+		}
+	}
 }
 
 func isPortHealthy(port int) bool {
@@ -259,12 +460,23 @@ func isPortHealthy(port int) bool {
 // ---------------------------------------------------------------- Health ---
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	opencodeFound := findOpenCodeBinary() != ""
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	engineFound := findOpenCodeBinary() != ""
+	sharedHealthy := isPortHealthy(4096) // shared instance used by the Termux flow
+	version := ""
+	if engineFound {
+		out, err := exec.Command(findOpenCodeBinary(), "--version").Output()
+		if err == nil {
+			version = strings.TrimSpace(string(out))
+		}
+	}
+	writeJSON(w, http.StatusOK, blob{
 		"bridge": "ok",
-		"opencode": map[string]interface{}{
-			"healthy": opencodeFound,
-			"version": "native-go-v0.2.0",
+		"auth":   cfg.Token != "",
+		"opencode": blob{
+			"healthy": engineFound || sharedHealthy,
+			"local":   engineFound,
+			"shared":  sharedHealthy,
+			"version": version,
 		},
 	})
 }
@@ -310,6 +522,19 @@ func slugify(s string) string {
 	return strings.Trim(s, "-")
 }
 
+func uniqueSlug(reg Registry, slug string) string {
+	taken := map[string]bool{}
+	for _, p := range reg.Projects {
+		taken[p.ID] = true
+	}
+	pid, i := slug, 2
+	for taken[pid] {
+		pid = fmt.Sprintf("%s-%d", slug, i)
+		i++
+	}
+	return pid
+}
+
 func handleProjects(w http.ResponseWriter, r *http.Request) {
 	lock.Lock()
 	defer lock.Unlock()
@@ -317,56 +542,72 @@ func handleProjects(w http.ResponseWriter, r *http.Request) {
 	reg := readRegistry()
 
 	if r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, reg)
+		writeJSON(w, http.StatusOK, blob{"projects": reg.Projects, "workspace": getWorkspaceDir()})
 		return
 	}
 
 	if r.Method == http.MethodPost {
 		var req struct {
-			Name      string `json:"name"`
-			InitialBr string `json:"initial_branch"`
+			Name          string `json:"name"`
+			InitialBr     string `json:"initial_branch"`
+			Branch        string `json:"branch"`
+			GitInit       *bool  `json:"git_init"`
+			InitialBranch string `json:"initialBranch"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		decodeBody(r, &req)
 		slug := slugify(req.Name)
 		if slug == "" {
 			slug = fmt.Sprintf("project-%d", time.Now().Unix())
 		}
 		branch := req.InitialBr
 		if branch == "" {
+			branch = req.InitialBranch
+		}
+		if branch == "" {
+			branch = req.Branch
+		}
+		if branch == "" {
 			branch = "main"
 		}
 
-		projPath := filepath.Join(getWorkspaceDir(), slug)
+		pid := uniqueSlug(reg, slug)
+		projPath := filepath.Join(getWorkspaceDir(), pid)
 		os.MkdirAll(projPath, 0755)
 
-		// git init
-		exec.Command("git", "init", "--initial-branch", branch, projPath).Run()
-		cmd := exec.Command("git", "commit", "--allow-empty", "-m", "initial commit")
-		cmd.Dir = projPath
-		cmd.Run()
+		gitInit := req.GitInit == nil || *req.GitInit
+		if gitInit {
+			exec.Command("git", "init", "--initial-branch", branch, projPath).Run()
+			cmd := exec.Command("git", "commit", "--allow-empty", "-m", "initial commit")
+			cmd.Dir = projPath
+			cmd.Run()
+		}
 
-		proj := Project{ID: slug, Name: req.Name, Path: projPath, Created: true}
+		proj := Project{ID: pid, Name: req.Name, Path: projPath, Created: gitInit}
 		reg.Projects = append(reg.Projects, proj)
 		writeRegistry(reg)
 
 		writeJSON(w, http.StatusOK, proj)
 		return
 	}
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 }
 
 func handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 	var req struct {
 		Path string `json:"path"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	decodeBody(r, &req)
 	absPath, err := filepath.Abs(req.Path)
 	if err != nil || req.Path == "" {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "Invalid path")
+		return
+	}
+	if fi, serr := os.Stat(absPath); serr != nil || !fi.IsDir() {
+		writeErr(w, http.StatusBadRequest, "not a folder: "+absPath)
 		return
 	}
 
@@ -375,10 +616,7 @@ func handleProjectImport(w http.ResponseWriter, r *http.Request) {
 
 	reg := readRegistry()
 	name := filepath.Base(absPath)
-	pid := slugify(name)
-	if pid == "" {
-		pid = fmt.Sprintf("project-%d", time.Now().Unix())
-	}
+	pid := uniqueSlug(reg, slugify(name))
 	proj := Project{ID: pid, Name: name, Path: absPath}
 	reg.Projects = append(reg.Projects, proj)
 	writeRegistry(reg)
@@ -388,7 +626,7 @@ func handleProjectImport(w http.ResponseWriter, r *http.Request) {
 
 func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 	var req struct {
@@ -396,10 +634,10 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 		Name   string `json:"name"`
 		Branch string `json:"branch"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	decodeBody(r, &req)
 	gitURL := strings.TrimSpace(req.URL)
 	if gitURL == "" {
-		http.Error(w, "Repository URL required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "Repository URL required")
 		return
 	}
 
@@ -408,11 +646,12 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 		base := filepath.Base(gitURL)
 		name = strings.TrimSuffix(base, ".git")
 	}
-	pid := slugify(name)
-	if pid == "" {
-		pid = fmt.Sprintf("project-%d", time.Now().Unix())
-	}
 
+	lock.Lock()
+	defer lock.Unlock()
+
+	reg := readRegistry()
+	pid := uniqueSlug(reg, slugify(name))
 	destPath := filepath.Join(getWorkspaceDir(), pid)
 	os.MkdirAll(filepath.Dir(destPath), 0755)
 
@@ -426,14 +665,11 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 	var errOut bytes.Buffer
 	cmd.Stderr = &errOut
 	if err := cmd.Run(); err != nil {
-		http.Error(w, fmt.Sprintf("Git clone failed: %s %v", errOut.String(), err), http.StatusBadRequest)
+		os.RemoveAll(destPath)
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("Git clone failed: %s %v", strings.TrimSpace(errOut.String()), err))
 		return
 	}
 
-	lock.Lock()
-	defer lock.Unlock()
-
-	reg := readRegistry()
 	proj := Project{ID: pid, Name: name, Path: destPath, Created: true}
 	reg.Projects = append(reg.Projects, proj)
 	writeRegistry(reg)
@@ -444,26 +680,59 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 func handleProjectOps(w http.ResponseWriter, r *http.Request) {
 	pid := strings.TrimPrefix(r.URL.Path, "/api/projects/")
 	pid = strings.TrimPrefix(pid, "/projects/")
+	pid = strings.TrimSuffix(pid, "/stop")
 	if pid == "" {
-		http.Error(w, "Project ID required", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "Project ID required")
 		return
 	}
+
+	isStop := strings.HasSuffix(r.URL.Path, "/stop")
 
 	lock.Lock()
 	defer lock.Unlock()
 
 	reg := readRegistry()
-	if r.Method == http.MethodDelete {
-		var updated []Project
+	switch {
+	case r.Method == http.MethodGet:
 		for _, p := range reg.Projects {
-			if p.ID != pid {
-				updated = append(updated, p)
+			if p.ID == pid {
+				writeJSON(w, http.StatusOK, p)
+				return
 			}
+		}
+		writeErr(w, http.StatusNotFound, "project not found")
+
+	case isStop && r.Method == http.MethodPost:
+		ok := instMgr.Stop(pid)
+		writeJSON(w, http.StatusOK, blob{"ok": ok})
+
+	case r.Method == http.MethodDelete:
+		q := r.URL.Query().Get("delete_dir") == "true"
+		found := false
+		var updated []Project
+		var dirPath string
+		for _, p := range reg.Projects {
+			if p.ID == pid {
+				found = true
+				dirPath = p.Path
+				continue
+			}
+			updated = append(updated, p)
+		}
+		if !found {
+			writeErr(w, http.StatusNotFound, "project not found")
+			return
 		}
 		reg.Projects = updated
 		writeRegistry(reg)
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-		return
+		instMgr.Stop(pid)
+		if q && strings.HasPrefix(filepath.Clean(dirPath), filepath.Clean(getWorkspaceDir())+string(filepath.Separator)) {
+			os.RemoveAll(dirPath)
+		}
+		writeJSON(w, http.StatusOK, blob{"ok": true})
+
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
 }
 
@@ -473,10 +742,20 @@ func findProject(pid string) *Project {
 	reg := readRegistry()
 	for _, p := range reg.Projects {
 		if p.ID == pid {
-			return &p
+			pp := p
+			return &pp
 		}
 	}
 	return nil
+}
+
+func projectOr404(w http.ResponseWriter, pid string) *Project {
+	proj := findProject(pid)
+	if proj == nil {
+		writeErr(w, http.StatusNotFound, "project not found")
+		return nil
+	}
+	return proj
 }
 
 func handleFS(w http.ResponseWriter, r *http.Request) {
@@ -484,25 +763,28 @@ func handleFS(w http.ResponseWriter, r *http.Request) {
 	cleanPath = strings.TrimPrefix(cleanPath, "/fs/")
 	parts := strings.Split(cleanPath, "/")
 	if len(parts) < 2 {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "Invalid path")
 		return
 	}
 	pid := parts[0]
 	op := parts[1]
 
-	proj := findProject(pid)
+	proj := projectOr404(w, pid)
 	if proj == nil {
-		http.Error(w, "Project not found", http.StatusNotFound)
 		return
 	}
 
 	switch op {
 	case "tree":
 		sub := r.URL.Query().Get("path")
-		dirPath := filepath.Join(proj.Path, sub)
+		dirPath, jerr := safeJoin(proj.Path, sub)
+		if jerr != nil {
+			writeErr(w, http.StatusBadRequest, jerr.Error())
+			return
+		}
 		entries, err := os.ReadDir(dirPath)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		type Entry struct {
@@ -510,9 +792,9 @@ func handleFS(w http.ResponseWriter, r *http.Request) {
 			Dir  bool   `json:"dir"`
 			Size int64  `json:"size"`
 		}
-		var list []Entry
+		list := []Entry{}
 		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), ".") && e.Name() != ".gitignore" {
+			if e.Name() == ".git" || e.Name() == "node_modules" || e.Name() == "__pycache__" {
 				continue
 			}
 			info, _ := e.Info()
@@ -521,33 +803,55 @@ func handleFS(w http.ResponseWriter, r *http.Request) {
 				sz = info.Size()
 			}
 			list = append(list, Entry{Name: e.Name(), Dir: e.IsDir(), Size: sz})
+			if len(list) >= 500 {
+				break
+			}
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"entries": list, "path": sub})
+		writeJSON(w, http.StatusOK, blob{"entries": list, "path": sub})
 
 	case "read":
 		rel := r.URL.Query().Get("path")
-		filePath := filepath.Join(proj.Path, rel)
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		filePath, jerr := safeJoin(proj.Path, rel)
+		if jerr != nil {
+			writeErr(w, http.StatusBadRequest, jerr.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"content": string(content), "path": rel})
+		f, ferr := os.Open(filePath)
+		if ferr != nil {
+			writeErr(w, http.StatusNotFound, "file not found")
+			return
+		}
+		defer f.Close()
+		content, _ := io.ReadAll(io.LimitReader(f, 2<<20)) // 2 MB cap
+		writeJSON(w, http.StatusOK, blob{"content": string(content), "path": rel})
 
 	case "write":
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
 		var req struct {
 			Path    string `json:"path"`
 			Content string `json:"content"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
-		filePath := filepath.Join(proj.Path, req.Path)
+		decodeBody(r, &req)
+		if len(req.Content) > 8<<20 {
+			writeErr(w, http.StatusRequestEntityTooLarge, "file too large (8 MB cap)")
+			return
+		}
+		filePath, jerr := safeJoin(proj.Path, req.Path)
+		if jerr != nil {
+			writeErr(w, http.StatusBadRequest, jerr.Error())
+			return
+		}
 		os.MkdirAll(filepath.Dir(filePath), 0755)
-		os.WriteFile(filePath, []byte(req.Content), 0644)
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		if werr := os.WriteFile(filePath, []byte(req.Content), 0644); werr != nil {
+			writeErr(w, http.StatusInternalServerError, werr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, blob{"ok": true})
+	default:
+		writeErr(w, http.StatusNotFound, "unknown fs action")
 	}
 }
 
@@ -563,7 +867,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request) {
 	p, _ = filepath.Abs(p)
 	entries, err := os.ReadDir(p)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	type DirItem struct {
@@ -571,18 +875,21 @@ func handleBrowse(w http.ResponseWriter, r *http.Request) {
 		Path  string `json:"path"`
 		IsDir bool   `json:"is_dir"`
 	}
-	var res []DirItem
+	res := []DirItem{}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".") && e.Name() != ".gitignore" {
 			continue
 		}
 		res = append(res, DirItem{Name: e.Name(), Path: filepath.Join(p, e.Name()), IsDir: e.IsDir()})
+		if len(res) >= 500 {
+			break
+		}
 	}
 	parent := filepath.Dir(p)
 	if parent == p {
 		parent = ""
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"current": p, "parent": parent, "entries": res})
+	writeJSON(w, http.StatusOK, blob{"current": p, "path": p, "parent": parent, "entries": res})
 }
 
 // ------------------------------------------------------------------- Git ---
@@ -597,9 +904,17 @@ func runGit(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), err
 }
 
+func runGitOK(dir string, args ...string) (string, error) {
+	out, err := runGit(dir, args...)
+	if err != nil && out == "" {
+		return out, fmt.Errorf("git %s failed", args[0])
+	}
+	return out, err
+}
+
 func isGitRepo(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, ".git"))
-	return err == nil
+	fi, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil && (fi.IsDir() || fi.Mode().Type() == 0) // dir or worktree file
 }
 
 func handleGitGlobalConfig(w http.ResponseWriter, r *http.Request) {
@@ -617,31 +932,250 @@ func handleGitGlobalConfig(w http.ResponseWriter, r *http.Request) {
 			Name  string `json:"name"`
 			Email string `json:"email"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		decodeBody(r, &req)
 		if req.Name != "" {
 			exec.Command("git", "config", "--global", "user.name", strings.TrimSpace(req.Name)).Run()
 		}
 		if req.Email != "" {
 			exec.Command("git", "config", "--global", "user.email", strings.TrimSpace(req.Email)).Run()
 		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, blob{"ok": true})
+		return
 	}
+	writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+}
+
+var conflictPairs = map[string]bool{
+	"DD": true, "AU": true, "UD": true, "UA": true,
+	"DU": true, "AA": true, "UU": true,
+}
+
+func gitStatusPayload(projPath string) blob {
+	if !isGitRepo(projPath) {
+		return gitStatusPayloadNonRepo()
+	}
+	out, _ := runGit(projPath, "status", "--porcelain=v1", "-b")
+	lines := strings.Split(out, "\n")
+	staged, unstaged, untracked, conflicts := []blob{}, []blob{}, []blob{}, []blob{}
+	first := true
+	for _, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		if first {
+			first = false // header line "## branch..." parsed by branchFromPorcelain
+			continue
+		}
+		if len(l) < 3 {
+			continue
+		}
+		x, y := l[0], l[1]
+		file := strings.TrimSpace(l[3:])
+		entry := blob{"x": string(x), "y": string(y), "path": file}
+		if conflictPairs[string(x)+string(y)] || x == 'U' || y == 'U' {
+			conflicts = append(conflicts, entry)
+		} else if x == '?' && y == '?' {
+			untracked = append(untracked, entry)
+		} else {
+			if x != ' ' && x != '?' {
+				staged = append(staged, entry)
+			}
+			if y != ' ' && y != '?' {
+				unstaged = append(unstaged, entry)
+			}
+		}
+	}
+	clean := len(staged) == 0 && len(unstaged) == 0 && len(untracked) == 0 && len(conflicts) == 0
+	return blob{
+		"is_git": true, "branch": branchFromPorcelain(out), "clean": clean,
+		"staged": staged, "unstaged": unstaged, "untracked": untracked, "conflicts": conflicts,
+		"has_conflicts": len(conflicts) > 0,
+	}
+}
+
+func branchFromPorcelain(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "## ") {
+			b := strings.TrimSpace(strings.TrimPrefix(l, "## "))
+			if i := strings.Index(b, "..."); i >= 0 {
+				b = b[:i]
+			}
+			return b
+		}
+	}
+	return ""
+}
+
+func stageFiles(projPath string, files []string) error {
+	if len(files) == 0 {
+		_, err := runGit(projPath, "add", "-A")
+		return err
+	}
+	for _, f := range files {
+		clean, ferr := safeJoin(projPath, f)
+		if ferr != nil {
+			return ferr
+		}
+		rel, rerr := filepath.Rel(projPath, clean)
+		if rerr != nil {
+			return rerr
+		}
+		if _, gerr := runGit(projPath, "add", "--", rel); gerr != nil {
+			return gerr
+		}
+	}
+	return nil
+}
+
+func unstageFiles(projPath string, files []string) error {
+	if len(files) == 0 {
+		_, err := runGit(projPath, "reset")
+		return err
+	}
+	for _, f := range files {
+		clean, ferr := safeJoin(projPath, f)
+		if ferr != nil {
+			return ferr
+		}
+		rel, _ := filepath.Rel(projPath, clean)
+		if _, gerr := runGit(projPath, "reset", "--", rel); gerr != nil {
+			return gerr
+		}
+	}
+	return nil
+}
+
+func stashRef(index int) (string, error) {
+	if index < 0 {
+		return "", fmt.Errorf("invalid stash index")
+	}
+	return fmt.Sprintf("stash@{%d}", index), nil
+}
+
+func graphCommits(projPath string, limit int) []blob {
+	fmtStr := "%H%x1f%P%x1f%h%x1f%d%x1f%s%x1f%an%x1f%ad"
+	out, err := runGit(projPath, "log", "--all", "--date-order",
+		fmt.Sprintf("--pretty=format:%s", fmtStr), "--date=short", strconv.Itoa(-limit))
+	if err != nil {
+		return []blob{}
+	}
+	commits := []blob{}
+	decoReplacer := strings.NewReplacer("(", "", ")", "")
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.Split(line, "\x1f")
+		if len(parts) < 7 {
+			continue
+		}
+		var refs []string
+		if deco := strings.TrimSpace(decoReplacer.Replace(parts[3])); deco != "" {
+			for _, rf := range strings.Split(deco, ",") {
+				rf = strings.TrimSpace(rf)
+				rf = strings.TrimPrefix(rf, "HEAD -> ")
+				if rf != "" {
+					refs = append(refs, rf)
+				}
+			}
+		}
+		if refs == nil {
+			refs = []string{}
+		}
+		parents := strings.Fields(parts[1])
+		if parents == nil {
+			parents = []string{}
+		}
+		commits = append(commits, blob{
+			"hash": parts[0], "short": parts[2],
+			"parents": parents, "refs": refs,
+			"subject": parts[4], "author": parts[5], "date": parts[6],
+		})
+	}
+	return commits
+}
+
+func branchesPayload(projPath string) blob {
+	cur, _ := runGit(projPath, "rev-parse", "--abbrev-ref", "HEAD")
+	out, _ := runGit(projPath, "branch", "--format=%(refname:short)")
+	list := []string{}
+	for _, b := range strings.Split(out, "\n") {
+		if strings.TrimSpace(b) != "" {
+			list = append(list, strings.TrimSpace(b))
+		}
+	}
+	return blob{"current": cur, "all": list}
+}
+
+type remoteInfo struct {
+	Name  string `json:"name"`
+	Fetch string `json:"fetch"`
+	Push  string `json:"push"`
+}
+
+func remotesList(projPath string) []remoteInfo {
+	out, _ := runGit(projPath, "remote", "-v")
+	seen := map[string]*remoteInfo{}
+	var order []string
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 3 {
+			name, u, kind := f[0], f[1], f[2]
+			if seen[name] == nil {
+				seen[name] = &remoteInfo{Name: name}
+				order = append(order, name)
+			}
+			if strings.Contains(kind, "fetch") {
+				seen[name].Fetch = u
+			} else {
+				seen[name].Push = u
+			}
+		}
+	}
+	var list []remoteInfo
+	for _, n := range order {
+		list = append(list, *seen[n])
+	}
+	return list
+}
+
+func stashesPayload(projPath string) []blob {
+	out, _ := runGit(projPath, "stash", "list")
+	list := []blob{}
+	i := 0
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		label := line
+		if idx := strings.Index(line, ":"); idx >= 0 {
+			label = strings.TrimSpace(line[idx+1:])
+		}
+		list = append(list, blob{"index": i, "label": label})
+		i++
+	}
+	return list
 }
 
 func handleGit(w http.ResponseWriter, r *http.Request) {
 	cleanPath := strings.TrimPrefix(r.URL.Path, "/api/git/")
 	cleanPath = strings.TrimPrefix(cleanPath, "/git/")
-	parts := strings.Split(cleanPath, "/")
-	if len(parts) < 2 {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
+	if cleanPath == "" {
+		writeErr(w, http.StatusBadRequest, "Invalid path")
 		return
 	}
-	pid := parts[0]
-	action := parts[1]
+	parts := strings.Split(cleanPath, "/")
 
-	proj := findProject(pid)
+	// Global identity endpoints are registered separately; skip them here.
+	if parts[0] == "config" {
+		handleGitGlobalConfig(w, r)
+		return
+	}
+
+	pid := parts[0]
+	action := ""
+	if len(parts) >= 2 {
+		action = parts[1]
+	}
+
+	proj := projectOr404(w, pid)
 	if proj == nil {
-		http.Error(w, "Project not found", http.StatusNotFound)
 		return
 	}
 
@@ -649,146 +1183,422 @@ func handleGit(w http.ResponseWriter, r *http.Request) {
 		if action == "init" && r.Method == http.MethodPost {
 			runGit(proj.Path, "init")
 			runGit(proj.Path, "commit", "--allow-empty", "-m", "initial commit")
-			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+			writeJSON(w, http.StatusOK, blob{"ok": true})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"is_git": false, "branch": "", "clean": true, "staged": []string{}, "unstaged": []string{}, "untracked": []string{}, "branches": []string{}, "remotes": []string{},
-		})
+		if action == "status" || action == "" {
+			writeJSON(w, http.StatusOK, gitStatusPayloadNonRepo())
+			return
+		}
+		writeJSON(w, http.StatusOK, blob{"ok": false, "detail": "not a git repository"})
 		return
 	}
 
 	switch action {
+	case "init":
+		// Only reachable when the repo already exists; create handles fresh repos.
+		writeJSON(w, http.StatusOK, blob{"ok": true, "out": "repository already initialized"})
+
 	case "status":
-		out, _ := runGit(proj.Path, "status", "--porcelain=v1", "-b")
-		branch, _ := runGit(proj.Path, "branch", "--show-current")
-		var staged, unstaged, untracked []string
-		lines := strings.Split(out, "\n")
-		for _, l := range lines {
-			if len(l) < 3 {
-				continue
-			}
-			x, y := l[0], l[1]
-			file := strings.TrimSpace(l[3:])
-			if x == '?' && y == '?' {
-				untracked = append(untracked, file)
-			} else {
-				if x != ' ' && x != '?' {
-					staged = append(staged, file)
-				}
-				if y != ' ' && y != '?' {
-					unstaged = append(unstaged, file)
-				}
+		writeJSON(w, http.StatusOK, gitStatusPayload(proj.Path))
+
+	case "log":
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 200 {
+			limit = 30
+		}
+		fmtStr := "%H%x1f%an%x1f%ad%x1f%s"
+		out, err := runGit(proj.Path, "log", fmt.Sprintf("--pretty=format:%s", fmtStr),
+			"--date=short", fmt.Sprintf("-%d", limit))
+		if err != nil {
+			writeJSON(w, http.StatusOK, blob{"commits": []blob{}})
+			return
+		}
+		commits := []blob{}
+		for _, line := range strings.Split(out, "\n") {
+			p := strings.Split(line, "\x1f")
+			if len(p) == 4 {
+				commits = append(commits, blob{
+					"hash": p[0][:minInt(8, len(p[0]))], "author": p[1],
+					"date": p[2], "subject": p[3],
+				})
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"is_git": true, "branch": branch, "clean": len(staged) == 0 && len(unstaged) == 0 && len(untracked) == 0,
-			"staged": staged, "unstaged": unstaged, "untracked": untracked,
+		writeJSON(w, http.StatusOK, blob{"commits": commits})
+
+	case "graph":
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 300 {
+			limit = 60
+		}
+		writeJSON(w, http.StatusOK, blob{
+			"commits":  graphCommits(proj.Path, limit),
+			"branches": branchesPayload(proj.Path),
+			"remotes":  remotesList(proj.Path),
 		})
+
+	case "branches":
+		writeJSON(w, http.StatusOK, branchesPayload(proj.Path))
 
 	case "diff":
 		target := r.URL.Query().Get("file")
-		staged := r.URL.Query().Get("staged") == "1"
-		args := []string{"diff"}
-		if staged {
-			args = append(args, "--staged")
+		if target == "" {
+			target = r.URL.Query().Get("path")
+		}
+		stagedQ := r.URL.Query().Get("staged") == "true" || r.URL.Query().Get("staged") == "1"
+		args := []string{"diff", "--no-color"}
+		if stagedQ {
+			args = append(args, "--cached")
 		}
 		if target != "" {
-			args = append(args, "--", target)
+			clean, jerr := safeJoin(proj.Path, target)
+			if jerr != nil {
+				writeErr(w, http.StatusBadRequest, jerr.Error())
+				return
+			}
+			rel, _ := filepath.Rel(proj.Path, clean)
+			args = append(args, "--", rel)
 		}
 		diff, _ := runGit(proj.Path, args...)
-		writeJSON(w, http.StatusOK, map[string]string{"diff": diff})
+		writeJSON(w, http.StatusOK, blob{"diff": diff})
 
 	case "stage":
 		var req struct {
 			Files []string `json:"files"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if len(req.Files) == 0 {
-			runGit(proj.Path, "add", "-A")
-		} else {
-			for _, f := range req.Files {
-				runGit(proj.Path, "add", f)
-			}
+		decodeBody(r, &req)
+		if err := stageFiles(proj.Path, req.Files); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, blob{"ok": true})
 
 	case "unstage":
 		var req struct {
 			Files []string `json:"files"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if len(req.Files) == 0 {
-			runGit(proj.Path, "restore", "--staged", ".")
-		} else {
-			for _, f := range req.Files {
-				runGit(proj.Path, "restore", "--staged", f)
-			}
+		decodeBody(r, &req)
+		if err := unstageFiles(proj.Path, req.Files); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, blob{"ok": true})
 
 	case "commit":
 		var req struct {
 			Message string `json:"message"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
-		runGit(proj.Path, "commit", "-m", req.Message)
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-
-	case "branches":
-		out, _ := runGit(proj.Path, "branch", "--format=%(refname:short)")
-		var list []string
-		for _, b := range strings.Split(out, "\n") {
-			if strings.TrimSpace(b) != "" {
-				list = append(list, strings.TrimSpace(b))
-			}
+		decodeBody(r, &req)
+		out, err := runGit(proj.Path, "commit", "-m", req.Message)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, shortOut(out, "commit failed"))
+			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"branches": list})
+		writeJSON(w, http.StatusOK, blob{"ok": true, "out": truncate(out, 400)})
+
+	case "push":
+		out, err := runGitOK(proj.Path, "push")
+		writeOut(w, orText(out, "pushed"), err)
+
+	case "pull":
+		out, err := runGitOK(proj.Path, "pull")
+		writeOut(w, orText(out, "pulled"), err)
+
+	case "fetch":
+		var req struct {
+			Name string `json:"name"`
+		}
+		decodeBody(r, &req)
+		remote := req.Name
+		if remote == "" {
+			remote = "origin"
+		}
+		out, err := runGitOK(proj.Path, "fetch", remote)
+		writeOut(w, orText(out, "fetched from "+remote), err)
+
+	case "checkout":
+		var req struct {
+			Ref string `json:"ref"`
+		}
+		decodeBody(r, &req)
+		ref, rerr := safeRef(req.Ref)
+		if rerr != nil {
+			writeErr(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		out, err := runGitOK(proj.Path, "checkout", ref)
+		writeOut(w, orText(out, "on "+ref), err)
+
+	case "discard":
+		var req struct {
+			Ref string `json:"ref"`
+		}
+		decodeBody(r, &req)
+		clean, jerr := safeJoin(proj.Path, req.Ref)
+		if jerr != nil {
+			writeErr(w, http.StatusBadRequest, jerr.Error())
+			return
+		}
+		rel, _ := filepath.Rel(proj.Path, clean)
+		out, err := runGitOK(proj.Path, "checkout", "--", rel)
+		writeOut(w, orText(out, "discarded changes in "+rel), err)
+
+	case "revert":
+		var req struct {
+			Ref string `json:"ref"`
+		}
+		decodeBody(r, &req)
+		ref, rerr := safeRef(req.Ref)
+		if rerr != nil {
+			writeErr(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		out, err := runGitOK(proj.Path, "revert", "--no-edit", ref)
+		writeOut(w, orText(out, "reverted "+ref), err)
+
+	case "merge":
+		var req struct {
+			Ref string `json:"ref"`
+		}
+		decodeBody(r, &req)
+		ref, rerr := safeRef(req.Ref)
+		if rerr != nil {
+			writeErr(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		out, err := runGitOK(proj.Path, "merge", "--no-edit", ref)
+		writeOut(w, orText(out, "merged "+ref), err)
+
+	case "resolve":
+		var req struct {
+			Path   string `json:"path"`
+			Choice string `json:"choice"`
+		}
+		decodeBody(r, &req)
+		clean, jerr := safeJoin(proj.Path, req.Path)
+		if jerr != nil {
+			writeErr(w, http.StatusBadRequest, jerr.Error())
+			return
+		}
+		rel, _ := filepath.Rel(proj.Path, clean)
+		flag := "--ours"
+		if req.Choice == "theirs" {
+			flag = "--theirs"
+		}
+		if _, gerr := runGit(proj.Path, "checkout", flag, "--", rel); gerr != nil {
+			writeErr(w, http.StatusBadRequest, gerr.Error())
+			return
+		}
+		stageFiles(proj.Path, []string{rel})
+		writeJSON(w, http.StatusOK, blob{"ok": true, "out": fmt.Sprintf("resolved %s using %s", rel, req.Choice)})
 
 	case "branch":
 		if len(parts) >= 3 {
-			subAction := parts[2]
+			sub := parts[2]
 			var req struct {
-				Name string `json:"name"`
+				Name  string `json:"name"`
+				Old   string `json:"old"`
+				New   string `json:"new"`
+				Force bool   `json:"force"`
 			}
-			json.NewDecoder(r.Body).Decode(&req)
-			if subAction == "create" {
-				runGit(proj.Path, "branch", req.Name)
-			} else if subAction == "checkout" {
-				runGit(proj.Path, "checkout", req.Name)
+			decodeBody(r, &req)
+			switch sub {
+			case "create":
+				name, rerr := safeRef(req.Name)
+				if rerr != nil {
+					writeErr(w, http.StatusBadRequest, rerr.Error())
+					return
+				}
+				out, err := runGitOK(proj.Path, "branch", name)
+				writeOut(w, orText(out, "created "+name), err)
+			case "delete":
+				name, rerr := safeRef(req.Name)
+				if rerr != nil {
+					writeErr(w, http.StatusBadRequest, rerr.Error())
+					return
+				}
+				flag := "-d"
+				if req.Force {
+					flag = "-D"
+				}
+				out, err := runGitOK(proj.Path, "branch", flag, name)
+				writeOut(w, orText(out, "deleted "+name), err)
+			case "rename":
+				old, rerr1 := safeRef(req.Old)
+				new, rerr2 := safeRef(req.New)
+				if rerr1 != nil || rerr2 != nil {
+					writeErr(w, http.StatusBadRequest, "invalid branch name")
+					return
+				}
+				out, err := runGitOK(proj.Path, "branch", "-m", old, new)
+				writeOut(w, orText(out, old+" → "+new), err)
+			default:
+				writeErr(w, http.StatusNotFound, "unknown branch action")
 			}
-			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 			return
 		}
+		var req struct {
+			Name string `json:"name"`
+		}
+		decodeBody(r, &req)
+		name, rerr := safeRef(req.Name)
+		if rerr != nil {
+			writeErr(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		out, err := runGitOK(proj.Path, "checkout", "-b", name)
+		writeOut(w, orText(out, "created "+name), err)
 
 	case "remotes":
-		out, _ := runGit(proj.Path, "remote", "-v")
-		type Remote struct {
-			Name  string `json:"name"`
-			Fetch string `json:"fetch"`
-			Push  string `json:"push"`
-		}
-		remotes := map[string]*Remote{}
-		for _, line := range strings.Split(out, "\n") {
-			f := strings.Fields(line)
-			if len(f) >= 3 {
-				name, u, kind := f[0], f[1], f[2]
-				if remotes[name] == nil {
-					remotes[name] = &Remote{Name: name}
-				}
-				if strings.Contains(kind, "fetch") {
-					remotes[name].Fetch = u
-				} else {
-					remotes[name].Push = u
-				}
+		writeJSON(w, http.StatusOK, blob{"remotes": remotesList(proj.Path)})
+
+	case "stash":
+		if len(parts) >= 3 {
+			sub := parts[2]
+			var req struct {
+				Index int `json:"index"`
 			}
+			decodeBody(r, &req)
+			ref, rerr := stashRef(req.Index)
+			if rerr != nil {
+				writeErr(w, http.StatusBadRequest, rerr.Error())
+				return
+			}
+			switch sub {
+			case "apply", "pop", "drop":
+				out, err := runGitOK(proj.Path, "stash", sub, ref)
+				verbs := map[string]string{"apply": "applied", "pop": "popped", "drop": "dropped"}
+				writeOut(w, orText(out, verbs[sub]+" "+ref), err)
+			default:
+				writeErr(w, http.StatusNotFound, "unknown stash action")
+			}
+			return
 		}
-		var list []*Remote
-		for _, r := range remotes {
-			list = append(list, r)
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, blob{"stashes": stashesPayload(proj.Path)})
+			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"remotes": list})
+		var req struct {
+			Message string `json:"message"`
+		}
+		decodeBody(r, &req)
+		args := []string{"stash", "push"}
+		if req.Message != "" {
+			args = append(args, "-m", req.Message)
+		}
+		out, err := runGitOK(proj.Path, args...)
+		writeOut(w, orText(out, "stashed"), err)
+
+	default:
+		writeErr(w, http.StatusNotFound, "unknown git action: "+action)
 	}
+}
+
+func gitStatusPayloadNonRepo() blob {
+	return blob{
+		"is_git": false, "branch": "", "clean": true,
+		"staged": []blob{}, "unstaged": []blob{}, "untracked": []blob{}, "conflicts": []blob{},
+		"has_conflicts": false,
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func shortOut(out, fallback string) string {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return fallback
+	}
+	return truncate(out, 500)
+}
+
+func orText(out, fallback string) string {
+	if strings.TrimSpace(out) == "" {
+		return fallback
+	}
+	return out
+}
+
+// ------------------------------------------------------------ Terminal -----
+
+func shellCommand(ctx context.Context, command string) *exec.Cmd {
+	if bash, err := exec.LookPath("bash"); err == nil {
+		return exec.CommandContext(ctx, bash, "-c", command)
+	}
+	if sh, err := exec.LookPath("sh"); err == nil {
+		return exec.CommandContext(ctx, sh, "-c", command)
+	}
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd.exe", "/c", command)
+	}
+	return exec.CommandContext(ctx, "/system/bin/sh", "-c", command)
+}
+
+func handleTerminal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	cleanPath := strings.TrimPrefix(r.URL.Path, "/api/terminal/")
+	cleanPath = strings.TrimPrefix(cleanPath, "/terminal/")
+	parts := strings.Split(cleanPath, "/")
+	if len(parts) < 2 || parts[1] != "exec" {
+		writeErr(w, http.StatusNotFound, "unknown terminal action")
+		return
+	}
+	proj := projectOr404(w, parts[0])
+	if proj == nil {
+		return
+	}
+	var req struct {
+		Command string  `json:"command"`
+		Timeout float64 `json:"timeout"`
+	}
+	decodeBody(r, &req)
+	command := strings.TrimSpace(req.Command)
+	if command == "" {
+		writeErr(w, http.StatusBadRequest, "command required")
+		return
+	}
+	timeout := req.Timeout
+	if timeout <= 0 || timeout > 120 {
+		timeout = 30
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout*float64(time.Second)))
+	defer cancel()
+	cmd := shellCommand(ctx, command)
+	cmd.Dir = proj.Path
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else if ctx.Err() == context.DeadlineExceeded {
+			stderr.WriteString(fmt.Sprintf("\nCommand timed out after %gs", timeout))
+			code = -1
+		} else {
+			stderr.WriteString("\n" + err.Error())
+			code = -1
+		}
+	}
+	writeJSON(w, http.StatusOK, blob{
+		"ok": code == 0, "code": code,
+		"stdout": stdout.String(), "stderr": stderr.String(),
+	})
 }
 
 // ------------------------------------------------- Models & LAN Scanner ---
@@ -809,128 +1619,34 @@ type ModelItem struct {
 	Size string `json:"size,omitempty"`
 }
 
-func handleScanLAN(w http.ResponseWriter, r *http.Request) {
-	var results []DiscoveredServer
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	ports := []int{11434, 1234, 8080, 8000, 5000}
-	hosts := []string{"127.0.0.1"}
-
-	// Scan local IP subnets
-	ifaces, _ := net.Interfaces()
-	for _, iface := range ifaces {
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				if ipnet.IP.To4() != nil {
-					ip := ipnet.IP.To4()
-					prefix := fmt.Sprintf("%d.%d.%d.", ip[0], ip[1], ip[2])
-					for i := 1; i <= 254; i++ {
-						hosts = append(hosts, fmt.Sprintf("%s%d", prefix, i))
-					}
-				}
-			}
-		}
-	}
-
-	client := &http.Client{Timeout: 600 * time.Millisecond}
-
-	for _, h := range hosts {
-		for _, p := range ports {
-			wg.Add(1)
-			go func(host string, port int) {
-				defer wg.Done()
-				srvType := "ollama"
-				path := "/api/tags"
-				name := "Ollama"
-				if port == 1234 {
-					srvType, path, name = "lmstudio", "/v1/models", "LM Studio"
-				} else if port == 8080 {
-					srvType, path, name = "llamacpp", "/v1/models", "llama.cpp"
-				}
-
-				u := fmt.Sprintf("http://%s:%d%s", host, port, path)
-				t0 := time.Now()
-				resp, err := client.Get(u)
-				if err == nil && resp.StatusCode == 200 {
-					lat := float64(time.Since(t0).Milliseconds())
-					var body map[string]interface{}
-					json.NewDecoder(resp.Body).Decode(&body)
-					resp.Body.Close()
-
-					var models []ModelItem
-					if srvType == "ollama" {
-						if mList, ok := body["models"].([]interface{}); ok {
-							for _, m := range mList {
-								if mObj, ok := m.(map[string]interface{}); ok {
-									mName, _ := mObj["name"].(string)
-									models = append(models, ModelItem{ID: mName, Name: mName})
-								}
-							}
-						}
-					} else {
-						if dList, ok := body["data"].([]interface{}); ok {
-							for _, d := range dList {
-								if dObj, ok := d.(map[string]interface{}); ok {
-									mID, _ := dObj["id"].(string)
-									models = append(models, ModelItem{ID: mID, Name: mID})
-								}
-							}
-						}
-					}
-
-					mu.Lock()
-					results = append(results, DiscoveredServer{
-						Type:    srvType,
-						Name:    name,
-						Host:    host,
-						Port:    port,
-						BaseURL: fmt.Sprintf("http://%s:%d/v1", host, port),
-						Latency: lat,
-						Models:  models,
-					})
-					mu.Unlock()
-				}
-			}(h, p)
-		}
-	}
-	wg.Wait()
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{"servers": results, "count": len(results)})
-}
-
-func handleProbeHost(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Host string `json:"host"`
-		Port int    `json:"port"`
-		Type string `json:"type"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-	if req.Port == 0 {
-		req.Port = 11434
-	}
-	srvType := req.Type
-	if srvType == "" {
-		srvType = "ollama"
-	}
+func scanHostPort(client *http.Client, host string, port int) *DiscoveredServer {
+	srvType := "ollama"
 	path := "/api/tags"
-	if srvType == "lmstudio" || srvType == "llamacpp" {
-		path = "/v1/models"
+	name := "Ollama"
+	if port == 1234 {
+		srvType, path, name = "lmstudio", "/v1/models", "LM Studio"
+	} else if port == 8080 {
+		srvType, path, name = "llamacpp", "/v1/models", "llama.cpp"
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	u := fmt.Sprintf("http://%s:%d%s", req.Host, req.Port, path)
+	u := fmt.Sprintf("http://%s:%d%s", host, port, path)
+	t0 := time.Now()
 	resp, err := client.Get(u)
 	if err != nil || resp.StatusCode != 200 {
-		http.Error(w, "AI server unreachable", http.StatusNotFound)
-		return
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil
 	}
-	defer resp.Body.Close()
+	lat := float64(time.Since(t0).Milliseconds())
+	var body map[string]interface{}
+	err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&body)
+	resp.Body.Close()
+	if err != nil {
+		return nil
+	}
 
 	var models []ModelItem
-	var body map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&body)
 	if srvType == "ollama" {
 		if mList, ok := body["models"].([]interface{}); ok {
 			for _, m := range mList {
@@ -940,16 +1656,163 @@ func handleProbeHost(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	} else {
+		if dList, ok := body["data"].([]interface{}); ok {
+			for _, d := range dList {
+				if dObj, ok := d.(map[string]interface{}); ok {
+					mID, _ := dObj["id"].(string)
+					models = append(models, ModelItem{ID: mID, Name: mID})
+				}
+			}
+		}
 	}
 
-	writeJSON(w, http.StatusOK, DiscoveredServer{
+	return &DiscoveredServer{
 		Type:    srvType,
-		Name:    srvType,
-		Host:    req.Host,
-		Port:    req.Port,
-		BaseURL: fmt.Sprintf("http://%s:%d/v1", req.Host, req.Port),
+		Name:    name,
+		Host:    host,
+		Port:    port,
+		BaseURL: fmt.Sprintf("http://%s:%d/v1", host, port),
+		Latency: lat,
 		Models:  models,
-	})
+	}
+}
+
+func localSubnetHosts() []string {
+	hosts := []string{"127.0.0.1"}
+	seenSubnets := map[string]bool{}
+	ifaces, _ := net.Interfaces()
+	for _, iface := range ifaces {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() || ipnet.IP.To4() == nil {
+				continue
+			}
+			ip := ipnet.IP.To4()
+			prefix := fmt.Sprintf("%d.%d.%d.", ip[0], ip[1], ip[2])
+			if seenSubnets[prefix] {
+				continue
+			}
+			seenSubnets[prefix] = true
+			for i := 1; i <= 254; i++ {
+				hosts = append(hosts, fmt.Sprintf("%s%d", prefix, i))
+			}
+		}
+	}
+	return hosts
+}
+
+func handleScanLAN(w http.ResponseWriter, r *http.Request) {
+	ports := []int{11434, 1234, 8080, 8000, 5000}
+	hosts := localSubnetHosts()
+
+	type task struct {
+		host string
+		port int
+	}
+	tasks := make(chan task)
+	results := make(chan *DiscoveredServer, len(hosts)*len(ports))
+
+	workers := 150
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			client := &http.Client{Timeout: 700 * time.Millisecond}
+			for t := range tasks {
+				if srv := scanHostPort(client, t.host, t.port); srv != nil {
+					results <- srv
+				}
+			}
+		}()
+	}
+
+	go func() {
+		for _, h := range hosts {
+			for _, p := range ports {
+				tasks <- task{h, p}
+			}
+		}
+		close(tasks)
+		wg.Wait()
+		close(results)
+	}()
+
+	results2 := []DiscoveredServer{}
+	for srv := range results {
+		results2 = append(results2, *srv)
+	}
+	writeJSON(w, http.StatusOK, blob{"servers": results2, "count": len(results2)})
+}
+
+func handleProbeHost(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+		Type string `json:"type"`
+	}
+	decodeBody(r, &req)
+	req.Host = strings.TrimSpace(req.Host)
+	if req.Host == "" {
+		writeErr(w, http.StatusBadRequest, "host required")
+		return
+	}
+	if req.Port == 0 {
+		req.Port = 11434
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	srv := scanHostPort(client, req.Host, req.Port)
+	if srv == nil {
+		writeErr(w, http.StatusNotFound, fmt.Sprintf("AI server unreachable at %s:%d", req.Host, req.Port))
+		return
+	}
+	if req.Type != "" {
+		srv.Type = req.Type
+	}
+	if srv.Models == nil {
+		srv.Models = []ModelItem{}
+	}
+	writeJSON(w, http.StatusOK, srv)
+}
+
+func opencodeConfigPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config/opencode/opencode.json")
+}
+
+func readOpencodeConfig() map[string]interface{} {
+	var fullCfg map[string]interface{}
+	b, _ := os.ReadFile(opencodeConfigPath())
+	json.Unmarshal(b, &fullCfg)
+	if fullCfg == nil {
+		fullCfg = map[string]interface{}{}
+	}
+	return fullCfg
+}
+
+func writeOpencodeConfig(cfgMap map[string]interface{}, secret bool) error {
+	os.MkdirAll(filepath.Dir(opencodeConfigPath()), 0755)
+	out, err := json.MarshalIndent(cfgMap, "", "  ")
+	if err != nil {
+		return err
+	}
+	mode := os.FileMode(0644)
+	if secret {
+		mode = 0600
+	}
+	return os.WriteFile(opencodeConfigPath(), out, mode)
+}
+
+func maskSecret(t string) string {
+	if t == "" {
+		return ""
+	}
+	if len(t) <= 8 {
+		return "****"
+	}
+	return fmt.Sprintf("%s...%s", t[:4], t[len(t)-4:])
 }
 
 func handleRegisterLocal(w http.ResponseWriter, r *http.Request) {
@@ -960,18 +1823,13 @@ func handleRegisterLocal(w http.ResponseWriter, r *http.Request) {
 		Models     []ModelItem `json:"models"`
 		APIKey     string      `json:"api_key"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".config/opencode/opencode.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0755)
-
-	var fullCfg map[string]interface{}
-	b, _ := os.ReadFile(cfgPath)
-	json.Unmarshal(b, &fullCfg)
-	if fullCfg == nil {
-		fullCfg = map[string]interface{}{}
+	decodeBody(r, &req)
+	if req.ProviderID == "" || req.BaseURL == "" {
+		writeErr(w, http.StatusBadRequest, "provider_id and base_url are required")
+		return
 	}
+
+	fullCfg := readOpencodeConfig()
 	providers, _ := fullCfg["provider"].(map[string]interface{})
 	if providers == nil {
 		providers = map[string]interface{}{}
@@ -980,27 +1838,64 @@ func handleRegisterLocal(w http.ResponseWriter, r *http.Request) {
 
 	modelsMap := map[string]interface{}{}
 	for _, m := range req.Models {
-		modelsMap[m.ID] = map[string]interface{}{"name": m.Name}
+		modelsMap[m.ID] = blob{"name": m.Name}
 	}
 
 	key := req.APIKey
 	if key == "" {
 		key = "local"
 	}
-	providers[req.ProviderID] = map[string]interface{}{
+	hasSecret := key != "local"
+	providers[req.ProviderID] = blob{
 		"npm":  "@ai-sdk/openai-compatible",
 		"name": req.Name,
-		"options": map[string]interface{}{
+		"options": blob{
 			"baseURL": req.BaseURL,
 			"apiKey":  key,
 		},
 		"models": modelsMap,
 	}
 
-	out, _ := json.MarshalIndent(fullCfg, "", "  ")
-	os.WriteFile(cfgPath, out, 0644)
+	if err := writeOpencodeConfig(fullCfg, hasSecret); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "config": fullCfg})
+	// Respond with a sanitized config so API keys never round-trip over HTTP.
+	sanitized := deepCopyMasked(fullCfg)
+	writeJSON(w, http.StatusOK, blob{"ok": true, "config": sanitized})
+}
+
+func deepCopyMasked(v interface{}) interface{} {
+	switch t := v.(type) {
+	case blob:
+		out := blob{}
+		for k, val := range t {
+			out[k] = maskValue(k, val)
+		}
+		return out
+	case map[string]interface{}:
+		out := map[string]interface{}{}
+		for k, val := range t {
+			out[k] = maskValue(k, val)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, val := range t {
+			out[i] = deepCopyMasked(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func maskValue(k string, val interface{}) interface{} {
+	if s, ok := val.(string); ok && k == "apiKey" && s != "" && s != "local" {
+		return maskSecret(s)
+	}
+	return deepCopyMasked(val)
 }
 
 func fetchLiveOpenCodeModels() map[string]interface{} {
@@ -1008,13 +1903,15 @@ func fetchLiveOpenCodeModels() map[string]interface{} {
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get("https://models.dev/api.json")
-	if err == nil && resp.StatusCode == 200 {
-		var liveData map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&liveData); err == nil {
-			resp.Body.Close()
-			b, _ := json.Marshal(liveData)
-			os.WriteFile(cachePath, b, 0644)
-			return liveData
+	if err == nil {
+		if resp.StatusCode == 200 {
+			var liveData map[string]interface{}
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&liveData); err == nil {
+				resp.Body.Close()
+				b, _ := json.Marshal(liveData)
+				os.WriteFile(cachePath, b, 0644)
+				return liveData
+			}
 		}
 		resp.Body.Close()
 	}
@@ -1028,6 +1925,14 @@ func fetchLiveOpenCodeModels() map[string]interface{} {
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		handleModelsWrite(w, r)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		handleModelsDelete(w, r)
+		return
+	}
 	pid := strings.TrimPrefix(r.URL.Path, "/api/models/")
 	pid = strings.TrimSpace(pid)
 
@@ -1042,15 +1947,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".config/opencode/opencode.json")
-
-	var fullCfg map[string]interface{}
-	b, _ := os.ReadFile(cfgPath)
-	json.Unmarshal(b, &fullCfg)
-	if fullCfg == nil {
-		fullCfg = map[string]interface{}{}
-	}
+	fullCfg := readOpencodeConfig()
 
 	type ProvInfo struct {
 		ID     string                 `json:"id"`
@@ -1061,49 +1958,42 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 
 	allLiveProviders := fetchLiveOpenCodeModels()
 
-	if opencodeLive, ok := allLiveProviders["opencode"].(map[string]interface{}); ok {
-		name, _ := opencodeLive["name"].(string)
+	appendProv := func(id string, data map[string]interface{}, fallback string) {
+		name, _ := data["name"].(string)
 		if name == "" {
-			name = "OpenCode Zen"
+			name = fallback
 		}
-		mMap, _ := opencodeLive["models"].(map[string]interface{})
-		list = append(list, ProvInfo{ID: "opencode", Name: name, Models: mMap})
+		mMap, _ := data["models"].(map[string]interface{})
+		if mMap == nil {
+			mMap = map[string]interface{}{}
+		}
+		list = append(list, ProvInfo{ID: id, Name: name, Models: mMap})
 	}
 
-	if googleLive, ok := allLiveProviders["google"].(map[string]interface{}); ok {
-		name, _ := googleLive["name"].(string)
-		if name == "" {
-			name = "Google Gemini"
-		}
-		mMap, _ := googleLive["models"].(map[string]interface{})
-		list = append(list, ProvInfo{ID: "google", Name: name, Models: mMap})
-	}
-
-	for _, provID := range []string{"anthropic", "openai", "deepseek"} {
-		if provLive, ok := allLiveProviders[provID].(map[string]interface{}); ok {
-			name, _ := provLive["name"].(string)
-			if name == "" {
-				name = strings.Title(provID)
+	for _, id := range []string{"opencode", "google", "anthropic", "openai", "deepseek"} {
+		if provLive, ok := allLiveProviders[id].(map[string]interface{}); ok {
+			names := map[string]string{
+				"opencode": "OpenCode Zen", "google": "Google Gemini",
+				"anthropic": "Anthropic", "openai": "OpenAI", "deepseek": "DeepSeek",
 			}
-			mMap, _ := provLive["models"].(map[string]interface{})
-			list = append(list, ProvInfo{ID: provID, Name: name, Models: mMap})
+			appendProv(id, provLive, names[id])
 		}
 	}
 
 	providersMap, _ := fullCfg["provider"].(map[string]interface{})
 	for id, p := range providersMap {
-		if id == "opencode" || id == "google" || id == "anthropic" || id == "openai" || id == "deepseek" {
-			continue
-		}
 		if pObj, ok := p.(map[string]interface{}); ok {
-			name, _ := pObj["name"].(string)
-			mMap, _ := pObj["models"].(map[string]interface{})
-			list = append(list, ProvInfo{ID: id, Name: name, Models: mMap})
+			appendProv(id, pObj, id)
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"providers": list})
+	if list == nil {
+		list = []ProvInfo{}
+	}
+	writeJSON(w, http.StatusOK, blob{"providers": list})
 }
+
+// model delete/add parity with the Python bridge -----------------------------
 
 func handleFavorites(w http.ResponseWriter, r *http.Request) {
 	favPath := filepath.Join(cfg.DataDir, "favorites.json")
@@ -1112,6 +2002,13 @@ func handleFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := os.ReadFile(favPath)
 	json.Unmarshal(b, &favs)
+	if favs.Favorites == nil {
+		// Accept legacy bare-array format as well.
+		var legacy []string
+		if json.Unmarshal(b, &legacy) == nil && legacy != nil {
+			favs.Favorites = legacy
+		}
+	}
 	if favs.Favorites == nil {
 		favs.Favorites = []string{}
 	}
@@ -1125,7 +2022,7 @@ func handleFavorites(w http.ResponseWriter, r *http.Request) {
 			ProviderID string `json:"provider_id"`
 			ModelID    string `json:"model_id"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		decodeBody(r, &req)
 		key := fmt.Sprintf("%s/%s", req.ProviderID, req.ModelID)
 		added := true
 		var next []string
@@ -1141,94 +2038,290 @@ func handleFavorites(w http.ResponseWriter, r *http.Request) {
 		}
 		favs.Favorites = next
 		out, _ := json.Marshal(favs)
-		os.WriteFile(favPath, out, 0644)
-		writeJSON(w, http.StatusOK, map[string]interface{}{"favorites": next, "added": added})
+		os.WriteFile(favPath, out, 0600)
+		writeJSON(w, http.StatusOK, blob{"favorites": next, "added": added})
+		return
 	}
+	writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+}
+
+// handleModelsWrite implements POST /api/models/{pid}: register or update a
+// single provider/model pair directly in the global opencode config so it
+// works even without a running engine.
+func handleModelsWrite(w http.ResponseWriter, r *http.Request) {
+	_ = strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/models/"), "models/") // pid unused: writes go to global config
+	var req struct {
+		ProviderID string                 `json:"provider_id"`
+		ModelID    string                 `json:"model_id"`
+		Options    map[string]interface{} `json:"options"`
+		SetDefault bool                   `json:"set_default"`
+	}
+	decodeBody(r, &req)
+	if req.ProviderID == "" || req.ModelID == "" {
+		writeErr(w, http.StatusBadRequest, "provider_id and model_id are required")
+		return
+	}
+
+	fullCfg := readOpencodeConfig()
+	prov, _ := fullCfg["provider"].(map[string]interface{})
+	if prov == nil {
+		prov = map[string]interface{}{}
+		fullCfg["provider"] = prov
+	}
+	pObj, _ := prov[req.ProviderID].(map[string]interface{})
+	if pObj == nil {
+		pObj = map[string]interface{}{
+			"npm":  "@ai-sdk/openai-compatible",
+			"name": req.ProviderID,
+		}
+		prov[req.ProviderID] = pObj
+	}
+	models, _ := pObj["models"].(map[string]interface{})
+	if models == nil {
+		models = map[string]interface{}{}
+		pObj["models"] = models
+	}
+	entry, _ := models[req.ModelID].(map[string]interface{})
+	if entry == nil {
+		entry = map[string]interface{}{}
+	}
+	for k, v := range req.Options {
+		if v != nil {
+			entry[k] = v
+		}
+	}
+	models[req.ModelID] = entry
+	if req.SetDefault {
+		fullCfg["model"] = req.ProviderID + "/" + req.ModelID
+	}
+	if err := writeOpencodeConfig(fullCfg, configHasSecrets(fullCfg)); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, blob{"ok": true})
+}
+
+// handleModelsDelete implements DELETE /api/models/{pid}.
+func handleModelsDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProviderID string `json:"provider_id"`
+		ModelID    string `json:"model_id"`
+	}
+	decodeBody(r, &req)
+	fullCfg := readOpencodeConfig()
+	if prov, ok := fullCfg["provider"].(map[string]interface{}); ok {
+		if pObj, ok := prov[req.ProviderID].(map[string]interface{}); ok {
+			if models, ok := pObj["models"].(map[string]interface{}); ok {
+				delete(models, req.ModelID)
+			}
+		}
+	}
+	if fullCfg["model"] == req.ProviderID+"/"+req.ModelID {
+		delete(fullCfg, "model")
+	}
+	if err := writeOpencodeConfig(fullCfg, configHasSecrets(fullCfg)); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, blob{"ok": true})
+}
+
+func configHasSecrets(cfgMap map[string]interface{}) bool {
+	prov, _ := cfgMap["provider"].(map[string]interface{})
+	for _, p := range prov {
+		pObj, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		opts, _ := pObj["options"].(map[string]interface{})
+		if opts == nil {
+			continue
+		}
+		if k, ok := opts["apiKey"].(string); ok && k != "" && k != "local" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------- Auth & Settings ---
 
-func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+func authJSONPath() string {
 	home, _ := os.UserHomeDir()
-	authPath := filepath.Join(home, ".local/share/opencode/auth.json")
-	var authData map[string]map[string]interface{}
-	b, _ := os.ReadFile(authPath)
+	return filepath.Join(home, ".local/share/opencode/auth.json")
+}
+
+func readAuthJSON() map[string]interface{} {
+	var authData map[string]interface{}
+	b, _ := os.ReadFile(authJSONPath())
 	json.Unmarshal(b, &authData)
-
-	opencodeToken := ""
-	if authData != nil && authData["opencode"] != nil {
-		opencodeToken, _ = authData["opencode"]["token"].(string)
+	if authData == nil {
+		authData = map[string]interface{}{}
 	}
+	return authData
+}
 
-	githubToken := ""
-	if authData != nil && authData["github"] != nil {
-		githubToken, _ = authData["github"]["token"].(string)
-	}
+func writeAuthJSON(data map[string]interface{}) {
+	os.MkdirAll(filepath.Dir(authJSONPath()), 0700)
+	out, _ := json.MarshalIndent(data, "", "  ")
+	writeFileSecret(authJSONPath(), out)
+}
 
-	mask := func(t string) string {
-		if t == "" {
-			return ""
+func lookupProviderKey(id string) string {
+	fullCfg := readOpencodeConfig()
+	prov, _ := fullCfg["provider"].(map[string]interface{})
+	if pObj, ok := prov[id].(map[string]interface{}); ok {
+		if opts, ok := pObj["options"].(map[string]interface{}); ok {
+			if k, ok := opts["apiKey"].(string); ok {
+				return k
+			}
 		}
-		if len(t) <= 8 {
-			return "****"
-		}
-		return fmt.Sprintf("%s...%s", t[:4], t[len(t)-4:])
 	}
+	envNames := map[string]string{
+		"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
+		"anthropic": "ANTHROPIC_API_KEY", "qwen": "DASHSCOPE_API_KEY",
+		"glm": "ZHIPU_API_KEY",
+	}
+	if env, ok := envNames[id]; ok {
+		return os.Getenv(env)
+	}
+	return ""
+}
 
+func credEntryFor(token string) string {
+	return fmt.Sprintf("https://%s:x-oauth-basic@github.com\nhttps://oauth2:%s@github.com\n", token, token)
+}
+
+// saveGitHubCredentials merges PAT entries into ~/.git-credentials without
+// destroying credentials for other hosts.
+func saveGitHubCredentials(token string) {
+	home, _ := os.UserHomeDir()
+	credPath := filepath.Join(home, ".git-credentials")
+	existing, _ := os.ReadFile(credPath)
+	var kept []string
+	for _, line := range strings.Split(string(existing), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		u, err := url.Parse(line)
+		if err != nil || !strings.Contains(u.Host, "github.com") {
+			kept = append(kept, line)
+		}
+	}
+	if token != "" {
+		kept = append(kept, strings.Split(strings.TrimSpace(credEntryFor(token)), "\n")...)
+	}
+	os.MkdirAll(home, 0700)
+	writeFileSecret(credPath, []byte(strings.Join(kept, "\n")+"\n"))
+	if len(kept) > 0 {
+		out, _ := exec.Command("git", "config", "--global", "credential.helper").Output()
+		if strings.TrimSpace(string(out)) == "" {
+			exec.Command("git", "config", "--global", "credential.helper", "store").Run()
+		}
+	}
+}
+
+func gitIdentity() (string, string) {
 	nameOut, _ := exec.Command("git", "config", "--global", "user.name").Output()
 	emailOut, _ := exec.Command("git", "config", "--global", "user.email").Output()
+	return strings.TrimSpace(string(nameOut)), strings.TrimSpace(string(emailOut))
+}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"opencode":  map[string]interface{}{"configured": opencodeToken != "", "preview": mask(opencodeToken)},
-		"github":    map[string]interface{}{"configured": githubToken != "", "preview": mask(githubToken)},
-		"git_user":  map[string]string{"name": strings.TrimSpace(string(nameOut)), "email": strings.TrimSpace(string(emailOut))},
-		"gemini":    map[string]interface{}{"configured": os.Getenv("GEMINI_API_KEY") != "", "preview": mask(os.Getenv("GEMINI_API_KEY"))},
-		"openai":    map[string]interface{}{"configured": os.Getenv("OPENAI_API_KEY") != "", "preview": mask(os.Getenv("OPENAI_API_KEY"))},
-		"anthropic": map[string]interface{}{"configured": os.Getenv("ANTHROPIC_API_KEY") != "", "preview": mask(os.Getenv("ANTHROPIC_API_KEY"))},
-	})
+func authStatusPayload() blob {
+	authData := readAuthJSON()
+	getTok := func(k string) string {
+		if obj, ok := authData[k].(map[string]interface{}); ok {
+			t, _ := obj["token"].(string)
+			return t
+		}
+		return ""
+	}
+	opencodeToken := getTok("opencode")
+	githubToken := getTok("github")
+	name, email := gitIdentity()
+
+	secrets := blob{}
+	for _, id := range []string{"gemini", "openai", "anthropic", "qwen", "glm"} {
+		k := lookupProviderKey(id)
+		secrets[id] = blob{"configured": k != "", "preview": maskSecret(k)}
+	}
+
+	payload := blob{
+		"opencode": blob{"configured": opencodeToken != "", "preview": maskSecret(opencodeToken)},
+		"github":   blob{"configured": githubToken != "", "preview": maskSecret(githubToken)},
+		"git_user": map[string]string{"name": name, "email": email},
+	}
+	for k, v := range secrets {
+		payload[k] = v
+	}
+	return payload
+}
+
+func handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, authStatusPayload())
 }
 
 func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProviderID string `json:"provider_id"`
 		Token      string `json:"token"`
+		BaseURL    string `json:"base_url"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	home, _ := os.UserHomeDir()
-	authPath := filepath.Join(home, ".local/share/opencode/auth.json")
-	os.MkdirAll(filepath.Dir(authPath), 0755)
-
-	var authData map[string]interface{}
-	b, _ := os.ReadFile(authPath)
-	json.Unmarshal(b, &authData)
-	if authData == nil {
-		authData = map[string]interface{}{}
+	decodeBody(r, &req)
+	provider := req.ProviderID
+	if provider == "" {
+		provider = "opencode"
 	}
-
 	tok := strings.TrimSpace(req.Token)
-	if req.ProviderID == "opencode" {
-		authData["opencode"] = map[string]string{
-			"type":  "api",
-			"token": tok,
+
+	switch provider {
+	case "opencode":
+		authData := readAuthJSON()
+		authData["opencode"] = blob{"type": "api", "token": tok}
+		writeAuthJSON(authData)
+	case "github":
+		authData := readAuthJSON()
+		if tok == "" {
+			delete(authData, "github")
+		} else {
+			authData["github"] = blob{"type": "token", "token": tok}
 		}
-	} else if req.ProviderID == "github" {
-		authData["github"] = map[string]string{
-			"type":  "token",
-			"token": tok,
+		writeAuthJSON(authData)
+		saveGitHubCredentials(tok)
+	default:
+		// Provider API keys go into the global opencode config.
+		fullCfg := readOpencodeConfig()
+		prov, _ := fullCfg["provider"].(map[string]interface{})
+		if prov == nil {
+			prov = map[string]interface{}{}
+			fullCfg["provider"] = prov
 		}
-		if tok != "" {
-			credPath := filepath.Join(home, ".git-credentials")
-			credEntry := fmt.Sprintf("https://%s:x-oauth-basic@github.com\nhttps://oauth2:%s@github.com\n", tok, tok)
-			os.WriteFile(credPath, []byte(credEntry), 0600)
-			exec.Command("git", "config", "--global", "credential.helper", "store").Run()
+		pObj, _ := prov[provider].(map[string]interface{})
+		if pObj == nil {
+			pObj = map[string]interface{}{}
+			prov[provider] = pObj
+		}
+		opts, _ := pObj["options"].(map[string]interface{})
+		if opts == nil {
+			opts = map[string]interface{}{}
+			pObj["options"] = opts
+		}
+		if tok == "" {
+			delete(opts, "apiKey")
+		} else {
+			opts["apiKey"] = tok
+		}
+		if req.BaseURL != "" {
+			opts["baseURL"] = strings.TrimSpace(req.BaseURL)
+		}
+		if err := writeOpencodeConfig(fullCfg, configHasSecrets(fullCfg)); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 	}
 
-	out, _ := json.MarshalIndent(authData, "", "  ")
-	os.WriteFile(authPath, out, 0644)
-
-	handleAuthStatus(w, r)
+	writeJSON(w, http.StatusOK, blob{"ok": true, "status": authStatusPayload()})
 }
 
 func getWorkspaceDir() string {
@@ -1246,30 +2339,37 @@ func getWorkspaceDir() string {
 
 func handleSettingsWorkspace(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, map[string]string{"workspace_dir": getWorkspaceDir()})
+		writeJSON(w, http.StatusOK, blob{"workspace_dir": getWorkspaceDir()})
 		return
 	}
 	if r.Method == http.MethodPost {
 		var req struct {
 			Path string `json:"path"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		decodeBody(r, &req)
 		p, _ := filepath.Abs(req.Path)
+		if req.Path == "" {
+			writeErr(w, http.StatusBadRequest, "path required")
+			return
+		}
 		os.MkdirAll(p, 0755)
 
 		settingsPath := filepath.Join(cfg.DataDir, "settings.json")
-		b, _ := json.Marshal(map[string]string{"workspace_dir": p})
-		os.WriteFile(settingsPath, b, 0644)
+		b, _ := json.Marshal(blob{"workspace_dir": p})
+		os.WriteFile(settingsPath, b, 0600)
 
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "workspace_dir": p})
+		writeJSON(w, http.StatusOK, blob{"ok": true, "workspace_dir": p})
+		return
 	}
+	writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 }
 
-// ---------------------------------------------------- OpenCode Proxy & Session Engine ---
+// ------------------------------------------- OpenCode Proxy & Sessions ---
 
 type Session struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
+	Tokens    int       `json:"tokens,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -1323,23 +2423,29 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 	cleanPath = strings.TrimPrefix(cleanPath, "/oc/")
 	parts := strings.Split(cleanPath, "/")
 	if len(parts) < 1 || parts[0] == "" {
-		http.Error(w, "Project ID required in /oc/{pid}/...", http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, "Project ID required in /oc/{pid}/...")
 		return
 	}
 	pid := parts[0]
 	rest := "/" + strings.Join(parts[1:], "/")
 
-	// 1. Try forwarding to running local OpenCode instance
+	// 1. Forward to a running local OpenCode instance when available.
 	inst, err := instMgr.Get(pid)
-	if err == nil && inst != nil {
+	if err == nil && inst != nil && isPortHealthy(inst.Port) {
 		target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
 		proxy := httputil.NewSingleHostReverseProxy(target)
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, perr error) {
+			writeErr(w, http.StatusBadGateway, "opencode instance unreachable")
+		}
 		r.URL.Path = rest
+		r.Host = fmt.Sprintf("127.0.0.1:%d", inst.Port)
 		proxy.ServeHTTP(w, r)
 		return
 	}
 
-	// 2. Standalone fallback: Handle Sessions, Messages & SSE stream directly in daemon
+	// 2. Standalone fallback: honest errors + persistent session storage.
+	const noEngine = "OpenCode engine is not installed — chat requires the opencode binary. Projects, files, git and terminal still work."
+
 	action := ""
 	if len(parts) >= 2 {
 		action = parts[1]
@@ -1351,81 +2457,110 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "keep-alive")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			writeErr(w, http.StatusInternalServerError, "Streaming unsupported")
 			return
 		}
-		fmt.Fprintf(w, "data: {\"type\":\"connected\"}\n\n")
+		fmt.Fprintf(w, "retry: 4000\n\n")
+		fmt.Fprintf(w, "data: {\"type\":\"connected\",\"engine\":false}\n\n")
 		flusher.Flush()
 		<-r.Context().Done()
 		return
 	}
 
 	if action == "session" {
-		if len(parts) == 2 {
-			if r.Method == http.MethodGet {
-				writeJSON(w, http.StatusOK, loadSessions(pid))
-				return
-			}
-			if r.Method == http.MethodPost {
-				sid := fmt.Sprintf("ses_%d", time.Now().UnixMilli())
-				s := Session{ID: sid, Title: "New Session", CreatedAt: time.Now()}
-				list := append([]Session{s}, loadSessions(pid)...)
-				saveSessions(pid, list)
-				writeJSON(w, http.StatusOK, s)
-				return
-			}
-		}
-
-		sid := parts[2]
-		if len(parts) == 4 && parts[3] == "message" {
-			if r.Method == http.MethodGet {
-				writeJSON(w, http.StatusOK, loadMessages(pid, sid))
-				return
-			}
-		}
-
-		if len(parts) == 4 && parts[3] == "prompt_async" && r.Method == http.MethodPost {
+		switch {
+		case len(parts) == 2 && r.Method == http.MethodGet:
+			writeJSON(w, http.StatusOK, loadSessions(pid))
+			return
+		case len(parts) == 2 && r.Method == http.MethodPost:
+			sid := fmt.Sprintf("ses_%d", time.Now().UnixMilli())
+			s := Session{ID: sid, Title: "New Session", CreatedAt: time.Now()}
+			list := append([]Session{s}, loadSessions(pid)...)
+			saveSessions(pid, list)
+			writeJSON(w, http.StatusOK, s)
+			return
+		case len(parts) == 3 && r.Method == http.MethodPatch:
 			var req struct {
-				Parts []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"parts"`
-				Model struct {
-					ProviderID string `json:"providerID"`
-					ModelID    string `json:"modelID"`
-				} `json:"model"`
+				Title string `json:"title"`
 			}
-			json.NewDecoder(r.Body).Decode(&req)
-			userText := ""
-			for _, p := range req.Parts {
-				if p.Type == "text" {
-					userText += p.Text
+			decodeBody(r, &req)
+			sid := parts[2]
+			list := loadSessions(pid)
+			for i := range list {
+				if list[i].ID == sid {
+					if req.Title != "" {
+						list[i].Title = req.Title
+					}
+					saveSessions(pid, list)
+					writeJSON(w, http.StatusOK, blob{"ok": true})
+					return
 				}
 			}
-
-			msgs := loadMessages(pid, sid)
-			userMsg := Message{ID: fmt.Sprintf("msg_%d", time.Now().UnixMilli()), Role: "user", Content: userText, CreatedAt: time.Now()}
-			msgs = append(msgs, userMsg)
-
-			aiMsg := Message{
-				ID:        fmt.Sprintf("msg_%d", time.Now().UnixMilli()+1),
-				Role:      "assistant",
-				Content:   fmt.Sprintf("Response for project `%s` using `%s/%s`:\n\n%s", pid, req.Model.ProviderID, req.Model.ModelID, userText),
-				CreatedAt: time.Now(),
-			}
-			msgs = append(msgs, aiMsg)
-			saveMessages(pid, sid, msgs)
-
-			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "sessionID": sid})
+			writeErr(w, http.StatusNotFound, "session not found")
 			return
+		case len(parts) == 3 && r.Method == http.MethodDelete:
+			sid := parts[2]
+			list := loadSessions(pid)
+			updated := list[:0]
+			for _, s := range list {
+				if s.ID != sid {
+					updated = append(updated, s)
+				}
+			}
+			saveSessions(pid, updated)
+			os.Remove(getMessagesFilePath(pid, sid))
+			writeJSON(w, http.StatusOK, blob{"ok": true})
+			return
+		}
+
+		if len(parts) >= 3 {
+			sid := parts[2]
+			if len(parts) == 4 && parts[3] == "message" && r.Method == http.MethodGet {
+				msgs := loadMessages(pid, sid)
+				// Wrap messages in the opencode shape the UI expects.
+				wrapped := []blob{}
+				for _, m := range msgs {
+					wrapped = append(wrapped, blob{
+						"info": blob{
+							"id": m.ID, "role": m.Role,
+							"time": blob{"created": m.CreatedAt.UnixMilli()},
+						},
+						"parts": []blob{{"type": "text", "text": m.Content}},
+					})
+				}
+				writeJSON(w, http.StatusOK, wrapped)
+				return
+			}
+			if len(parts) == 4 && (parts[3] == "prompt_async" || parts[3] == "prompt") && r.Method == http.MethodPost {
+				// Persist the user's turn so nothing is lost, then fail honestly.
+				var req struct {
+					Parts []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"parts"`
+				}
+				decodeBody(r, &req)
+				userText := ""
+				for _, p := range req.Parts {
+					if p.Type == "text" {
+						userText += p.Text
+					}
+				}
+				msgs := loadMessages(pid, sid)
+				msgs = append(msgs, Message{
+					ID: fmt.Sprintf("msg_%d", time.Now().UnixMilli()), Role: "user",
+					Content: userText, CreatedAt: time.Now(),
+				})
+				saveMessages(pid, sid, msgs)
+				writeErr(w, http.StatusServiceUnavailable, noEngine)
+				return
+			}
+			if parts[3] == "abort" && r.Method == http.MethodPost {
+				writeErr(w, http.StatusServiceUnavailable, noEngine)
+				return
+			}
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
-}
-
-func writeJSON(w http.ResponseWriter, code int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	writeErr(w, http.StatusServiceUnavailable, noEngine)
 }
