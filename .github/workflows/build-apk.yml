@@ -7,6 +7,7 @@ on:
       - "android/**"
       - "pwa/**"
       - "server/**"
+      - "daemon/**"
       - ".github/workflows/build-apk.yml"
 
 jobs:
@@ -23,41 +24,28 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Python 3.11 for packaging
-        uses: actions/setup-python@v5
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
         with:
-          python-version: "3.11"
+          go-version: "1.22"
+
+      - name: Compile Native Static ARM64 Daemon
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cd daemon
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../android/app/src/main/jniLibs/arm64-v8a/libdaemon.so .
+          cd ..
+          ls -lh android/app/src/main/jniLibs/arm64-v8a/libdaemon.so
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: "8.5"
 
-      - name: Prepare Standalone AArch64 Runtime Bundle
+      - name: Copy Assets
         run: |
-          mkdir -p staging/python
-          mkdir -p staging/bin
           mkdir -p android/app/src/main/assets/web
           mkdir -p android/app/src/main/assets/server
-
-          # 1. Download standalone relocatable AArch64 Python distribution
-          PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20240224/cpython-3.11.8+20240224-aarch64-unknown-linux-gnu-install_only.tar.gz"
-          echo "Downloading standalone AArch64 Python distribution from $PY_URL..."
-          curl -sL "$PY_URL" -o py_standalone.tar.gz
-          tar -xzf py_standalone.tar.gz -C staging/
-
-          # 2. Pre-install dependencies directly into the standalone Python site-packages
-          TARGET_SP="staging/python/lib/python3.11/site-packages"
-          mkdir -p "$TARGET_SP"
-          pip install --target "$TARGET_SP" fastapi uvicorn httpx pydantic starlette anyio
-
-          # 3. Create zip bundle for assets
-          cd staging
-          zip -r -9 ../android/app/src/main/assets/runtime-arm64.zip python/ bin/
-          cd ..
-          rm -rf staging py_standalone.tar.gz
-
-          # 4. Copy Web and Server source assets
           cp -r pwa/* android/app/src/main/assets/web/
           cp -r server/* android/app/src/main/assets/server/
           rm -rf android/app/src/main/assets/server/__pycache__

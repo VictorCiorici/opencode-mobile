@@ -8,7 +8,9 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class ProcessManager {
@@ -30,57 +32,69 @@ public class ProcessManager {
         }
 
         File filesDir = context.getFilesDir();
-        File serverDir = new File(filesDir, "server");
+        File webDir = new File(filesDir, "pwa");
         File logFile = new File(filesDir, "daemon.log");
-        File pythonHome = new File(filesDir, "python");
-        File bundledPython = new File(pythonHome, "bin/python3");
+
+        // Default workspace directory
+        File defaultWs = new File("/sdcard/OpenForge/projects");
+        if (!defaultWs.exists()) {
+            defaultWs.mkdirs();
+        }
+        String workspacePath = defaultWs.exists() ? defaultWs.getAbsolutePath() : new File(filesDir, "projects").getAbsolutePath();
+
+        // 1. Check for native static daemon in nativeLibraryDir (standard Android APK installation path)
+        File nativeDaemon = new File(context.getApplicationInfo().nativeLibraryDir, "libdaemon.so");
+        File extractedDaemon = new File(filesDir, "bin/openforge-daemon");
 
         try {
             Map<String, String> env = new HashMap<>(System.getenv());
             env.put("HOME", filesDir.getAbsolutePath());
             env.put("TMPDIR", context.getCacheDir().getAbsolutePath());
-            
-            // Default workspace directory
-            File defaultWs = new File("/sdcard/OpenForge/projects");
-            if (!defaultWs.exists()) {
-                defaultWs.mkdirs();
-            }
-            env.put("OCMB_WORKSPACE", defaultWs.exists() ? defaultWs.getAbsolutePath() : new File(filesDir, "projects").getAbsolutePath());
+            env.put("OCMB_WORKSPACE", workspacePath);
 
-            // Build PATH and Python environment
-            if (pythonHome.exists()) {
-                env.put("PYTHONHOME", pythonHome.getAbsolutePath());
-                env.put("PYTHONPATH", serverDir.getAbsolutePath() + ":" + new File(pythonHome, "lib/python3.11/site-packages").getAbsolutePath());
-                env.put("LD_LIBRARY_PATH", new File(pythonHome, "lib").getAbsolutePath() + (env.containsKey("LD_LIBRARY_PATH") ? ":" + env.get("LD_LIBRARY_PATH") : ""));
+            List<String> cmd = new ArrayList<>();
+
+            if (nativeDaemon.exists()) {
+                nativeDaemon.setExecutable(true, false);
+                Log.i(TAG, "Starting native static daemon from: " + nativeDaemon.getAbsolutePath());
+                cmd.add(nativeDaemon.getAbsolutePath());
+                cmd.add("-port"); cmd.add("8787");
+                cmd.add("-workspace"); cmd.add(workspacePath);
+                cmd.add("-data"); cmd.add(new File(filesDir, "data").getAbsolutePath());
+                if (webDir.exists()) {
+                    cmd.add("-web"); cmd.add(webDir.getAbsolutePath());
+                }
+            } else if (extractedDaemon.exists()) {
+                extractedDaemon.setExecutable(true, false);
+                Log.i(TAG, "Starting extracted daemon from: " + extractedDaemon.getAbsolutePath());
+                cmd.add(extractedDaemon.getAbsolutePath());
+                cmd.add("-port"); cmd.add("8787");
+                cmd.add("-workspace"); cmd.add(workspacePath);
+                cmd.add("-data"); cmd.add(new File(filesDir, "data").getAbsolutePath());
+                if (webDir.exists()) {
+                    cmd.add("-web"); cmd.add(webDir.getAbsolutePath());
+                }
+            } else {
+                // Fallback to Python if present
+                File pythonHome = new File(filesDir, "python");
+                File bundledPython = new File(pythonHome, "bin/python3");
+                File serverDir = new File(filesDir, "server");
+                String pythonExec = bundledPython.exists() ? bundledPython.getAbsolutePath() : "python3";
+                cmd.add(pythonExec);
+                cmd.add("-m"); cmd.add("uvicorn"); cmd.add("ocmb.main:app");
+                cmd.add("--app-dir"); cmd.add(serverDir.getAbsolutePath());
+                cmd.add("--host"); cmd.add("127.0.0.1");
+                cmd.add("--port"); cmd.add("8787");
             }
 
-            StringBuilder pathBuilder = new StringBuilder();
-            if (bundledPython.exists()) {
-                pathBuilder.append(bundledPython.getParentFile().getAbsolutePath()).append(":");
-            }
-            pathBuilder.append(new File(filesDir, "bin").getAbsolutePath()).append(":");
-            pathBuilder.append("/data/data/com.termux/files/usr/bin:");
-            if (env.containsKey("PATH")) {
-                pathBuilder.append(env.get("PATH"));
-            }
-            env.put("PATH", pathBuilder.toString());
-
-            String pythonExec = bundledPython.exists() ? bundledPython.getAbsolutePath() : "python3";
-            Log.i(TAG, "Launching standalone bridge with: " + pythonExec + " (PYTHONHOME=" + env.get("PYTHONHOME") + ")");
-
-            ProcessBuilder pb = new ProcessBuilder(
-                pythonExec, "-m", "uvicorn", "ocmb.main:app",
-                "--app-dir", serverDir.getAbsolutePath(),
-                "--host", "127.0.0.1",
-                "--port", "8787"
-            );
+            ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.environment().putAll(env);
             pb.directory(filesDir);
             pb.redirectErrorStream(true);
 
             bridgeProcess = pb.start();
 
-            // Pipe daemon logs
+            // Pipe daemon logs to file for debugging
             new Thread(() -> {
                 try (InputStream in = bridgeProcess.getInputStream();
                      FileOutputStream out = new FileOutputStream(logFile, true)) {
@@ -92,10 +106,10 @@ public class ProcessManager {
                 } catch (Exception ignored) {}
             }).start();
 
-            Log.i(TAG, "Standalone bridge daemon process successfully launched");
+            Log.i(TAG, "OpenForge native daemon launched successfully");
 
         } catch (Exception e) {
-            Log.e(TAG, "Failed to launch standalone bridge process", e);
+            Log.e(TAG, "Failed to launch native daemon process", e);
         }
     }
 
