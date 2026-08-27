@@ -175,6 +175,56 @@ class ModelDel(BaseModel):
     model_id: str
 
 
+from . import local_scanner
+
+# ------------------------------------------------------------- local scan ---
+
+class ScanIn(BaseModel):
+    subnet: str | None = None
+    include_lan: bool = True
+
+
+class ProbeIn(BaseModel):
+    host: str
+    port: int = 11434
+    path: str = "/api/tags"
+    type: str = "ollama"
+    name: str = "Ollama"
+
+
+class RegisterLocalIn(BaseModel):
+    provider_id: str
+    name: str
+    base_url: str
+    models: list[dict] | list[str] = []
+    api_key: str = ""
+
+
+@app.post("/api/models/scan-lan")
+async def scan_lan(body: ScanIn = ScanIn(), _: None = Depends(auth)):
+    servers = await local_scanner.scan_local_network(custom_subnet=body.subnet, include_lan=body.include_lan)
+    return {"servers": servers, "count": len(servers)}
+
+
+@app.post("/api/models/probe-host")
+async def probe_host(body: ProbeIn, _: None = Depends(auth)):
+    async with httpx.AsyncClient() as client:
+        res = await local_scanner.probe_endpoint(
+            client, body.host, body.port, body.path, body.type, body.name
+        )
+    if not res:
+        raise HTTPException(404, f"No AI model service found on {body.host}:{body.port}")
+    return res
+
+
+@app.post("/api/models/register-local")
+async def register_local(body: RegisterLocalIn, _: None = Depends(auth)):
+    cfg = local_scanner.register_local_provider(
+        body.provider_id, body.name, body.base_url, body.models, body.api_key
+    )
+    return {"ok": True, "config": cfg}
+
+
 @app.get("/api/models/{pid}")
 async def list_models(pid: str, _: None = Depends(auth)):
     inst = await manager.get(pid)

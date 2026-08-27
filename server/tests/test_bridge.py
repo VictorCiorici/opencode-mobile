@@ -88,3 +88,27 @@ def test_create_import_remove(workspace):
     assert imported["path"].endswith("ext")
     assert asyncio.run(projects.remove_project(imported["id"], delete_dir=True))
     assert not os.path.isdir(imported["path"])
+
+
+def test_local_scanner_and_register(workspace):
+    from fastapi.testclient import TestClient
+    from ocmb.main import app
+    client = TestClient(app)
+
+    r = client.post("/api/models/scan-lan", json={"include_lan": False})
+    assert r.status_code == 200
+    assert "servers" in r.json()
+
+    # Test registering a local Ollama/LAN model
+    reg = client.post("/api/models/register-local", json={
+        "provider_id": "ollama-test",
+        "name": "Ollama (LAN)",
+        "base_url": "http://192.168.1.100:11434/v1",
+        "models": [{"id": "qwen2.5-coder:7b", "name": "Qwen 2.5 Coder 7B"}]
+    })
+    assert reg.status_code == 200
+    cfg = reg.json()["config"]
+    assert "ollama-test" in cfg.get("provider", {})
+    assert "qwen2.5-coder:7b" in cfg["provider"]["ollama-test"]["models"]
+
+

@@ -112,17 +112,46 @@
 
   <!-- MODELS -->
   <section id="view-models" class="view">
-    <details class="card">
-      <summary>Add a model</summary>
-      <div class="form-col">
-        <input id="m-provider" placeholder="provider id (e.g. openai, anthropic, ollama)">
-        <input id="m-model" placeholder="model id (e.g. gpt-4o, qwen2.5-coder)">
+    <!-- Local & LAN Discovery -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-row" style="margin-bottom:6px">
+        <strong>📡 Local & LAN AI Servers</strong>
+        <button id="btn-scan-lan" class="primary" style="padding:6px 12px;font-size:12px">🔍 Scan Network</button>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin:0 0 8px">
+        Auto-discover Ollama, LM Studio, or llama.cpp running on this device or local Wi-Fi.
+      </p>
+      <div id="lan-scan-status" class="hidden" style="font-size:12px;color:var(--accent);margin-bottom:8px">
+        <span class="scan-dot">●</span> Scanning local subnet & ports (11434, 1234, 8080, 5000, 8000)…
+      </div>
+      <div id="lan-servers-list"></div>
+      <div class="card-row" style="margin-top:6px;margin-bottom:0">
+        <input id="lan-custom-host" placeholder="Direct IP (e.g. 192.168.1.50:11434)">
+        <button id="btn-probe-host" class="ghost" style="white-space:nowrap">Probe IP</button>
+      </div>
+    </div>
+
+    <details class="card" style="margin-bottom:12px">
+      <summary>+ Add Custom Model / Provider</summary>
+      <div class="form-col" style="margin-top:8px">
+        <div class="branch-chips" style="margin-bottom:4px">
+          <span class="chip" data-preset="ollama">Ollama (127.0.0.1:11434)</span>
+          <span class="chip" data-preset="llamacpp">llama.cpp (:8080)</span>
+          <span class="chip" data-preset="lmstudio">LM Studio (:1234)</span>
+          <span class="chip" data-preset="qwen">Qwen (DashScope)</span>
+          <span class="chip" data-preset="glm">GLM (Zhipu)</span>
+        </div>
+        <input id="m-provider" placeholder="provider id (e.g. ollama, openai, qwen)">
+        <input id="m-url" placeholder="base URL (e.g. http://127.0.0.1:11434/v1)">
+        <input id="m-model" placeholder="model id (e.g. qwen2.5-coder:7b, deepseek-r1)">
         <input id="m-name" placeholder="display name (optional)">
+        <input id="m-key" type="password" placeholder="API key (optional for local models)">
         <label class="check"><input type="checkbox" id="m-default"> set as default model</label>
-        <button id="btn-add-model" class="primary">Add model</button>
+        <button id="btn-add-model" class="primary">Save Model</button>
       </div>
     </details>
-    <h3 class="sect">Available models</h3>
+
+    <h3 class="sect">Active Models</h3>
     <div class="card-row"><input id="model-search" placeholder="🔍 Filter models…"></div>
     <ul id="model-list" class="list"></ul>
   </section>

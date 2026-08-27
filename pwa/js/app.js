@@ -1346,11 +1346,109 @@ $("#btn-git-remote")?.addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
-/* ---------------- models ---------------- */
-
-/* ---------------- models ---------------- */
+/* ---------------- models & local LAN scanner ---------------- */
 
 const M = { all: [], favorites: [] };
+
+// Preset definitions for quick manual addition
+const PRESETS = {
+  ollama: { provider: "ollama", url: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b", name: "Qwen 2.5 Coder 7B" },
+  llamacpp: { provider: "llamacpp", url: "http://127.0.0.1:8080/v1", model: "default", name: "Local GGUF" },
+  lmstudio: { provider: "lmstudio", url: "http://127.0.0.1:1234/v1", model: "qwen2.5-coder-32b-instruct", name: "Qwen 2.5 Coder 32B" },
+  qwen: { provider: "qwen", url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", model: "qwen-2.5-coder-32b-instruct", name: "Qwen 2.5 Coder 32B (DashScope)" },
+  glm: { provider: "glm", url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-plus", name: "GLM 4 Plus" },
+};
+
+$$(".branch-chips .chip[data-preset]").forEach((chip) => {
+  chip.onclick = () => {
+    const p = PRESETS[chip.dataset.preset];
+    if (!p) return;
+    $("#m-provider").value = p.provider;
+    $("#m-url").value = p.url;
+    $("#m-model").value = p.model;
+    $("#m-name").value = p.name;
+    toast(`Loaded preset: ${p.name}`);
+  };
+});
+
+async function scanLAN() {
+  const statusEl = $("#lan-scan-status");
+  const listEl = $("#lan-servers-list");
+  statusEl.classList.remove("hidden");
+  listEl.innerHTML = "";
+  try {
+    const res = await api("/api/models/scan-lan", { method: "POST", body: { include_lan: true } });
+    statusEl.classList.add("hidden");
+    const servers = res.servers || [];
+    if (!servers.length) {
+      listEl.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:6px 0">No active local AI servers detected on localhost or LAN.</div>`;
+      return;
+    }
+    for (const s of servers) {
+      const card = document.createElement("div");
+      card.className = "lan-server-card";
+      const modelChips = (s.models || []).map((m) =>
+        `<span class="lan-model-chip">${esc(m.name || m.id)}${m.size ? ` <small style="color:var(--muted)">(${m.size})</small>` : ""}</span>`
+      ).join("");
+      card.innerHTML = `
+        <div class="lan-server-head">
+          <div>
+            <strong class="lan-server-title">${esc(s.name)}</strong>
+            <small style="display:block;color:var(--muted);font-size:11px">${esc(s.base_url)}</small>
+          </div>
+          <span class="server-badge ${esc(s.type)}">${esc(s.type)}</span>
+        </div>
+        <div class="lan-models-list">
+          ${modelChips || '<span style="color:var(--muted);font-size:11px">(no models loaded)</span>'}
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:6px">
+          <button class="primary btn-import-server" style="font-size:12px;padding:4px 10px">Import All Models</button>
+        </div>`;
+      card.querySelector(".btn-import-server").onclick = async () => {
+        try {
+          await api("/api/models/register-local", {
+            method: "POST",
+            body: {
+              provider_id: s.type,
+              name: s.name,
+              base_url: s.base_url,
+              models: s.models || [],
+            },
+          });
+          toast(`Imported ${s.models?.length || 0} models from ${s.name}`);
+          loadModels();
+        } catch (e) { toast(e.message, true); }
+      };
+      listEl.appendChild(card);
+    }
+  } catch (err) {
+    statusEl.classList.add("hidden");
+    toast(err.message, true);
+  }
+}
+
+$("#btn-scan-lan")?.addEventListener("click", scanLAN);
+
+$("#btn-probe-host")?.addEventListener("click", async () => {
+  const hostVal = $("#lan-custom-host").value.trim().replace(/^https?:\/\//, "").replace(/\/+.*$/, "");
+  if (!hostVal) return toast("Enter an IP or host:port", true);
+  const parts = hostVal.split(":");
+  const host = parts[0];
+  const port = parts[1] ? parseInt(parts[1], 10) : 11434;
+  try {
+    toast(`Probing ${host}:${port}…`);
+    const res = await api("/api/models/probe-host", {
+      method: "POST",
+      body: { host, port, type: port === 1234 ? "lmstudio" : (port === 8080 ? "llamacpp" : "ollama") }
+    });
+    toast(`Found ${res.type} on ${host}:${port} with ${res.models?.length || 0} models!`);
+    await api("/api/models/register-local", {
+      method: "POST",
+      body: { provider_id: res.type, name: res.name, base_url: res.base_url, models: res.models || [] }
+    });
+    loadModels();
+  } catch (err) { toast(err.message, true); }
+});
 
 async function loadModels() {
   if (!S.pid) return;
@@ -1426,19 +1524,38 @@ $("#model-search").addEventListener("input", renderModels);
 $("#btn-add-model").addEventListener("click", async () => {
   const provider_id = $("#m-provider").value.trim();
   const model_id = $("#m-model").value.trim();
+  const base_url = $("#m-url") ? $("#m-url").value.trim() : "";
+  const api_key = $("#m-key") ? $("#m-key").value.trim() : "";
+  const display_name = $("#m-name").value.trim() || model_id;
   if (!provider_id || !model_id) return toast("Provider and model ids required", true);
   try {
-    await api(`/api/models/${S.pid}`, {
-      method: "POST",
-      body: {
-        provider_id, model_id,
-        options: $("#m-name").value.trim() ? { name: $("#m-name").value.trim() } : null,
-        set_default: $("#m-default").checked,
-      },
+    if (base_url) {
+      await api("/api/models/register-local", {
+        method: "POST",
+        body: {
+          provider_id,
+          name: provider_id,
+          base_url,
+          models: [{ id: model_id, name: display_name }],
+          api_key,
+        },
+      });
+    } else {
+      await api(`/api/models/${S.pid}`, {
+        method: "POST",
+        body: {
+          provider_id, model_id,
+          options: display_name ? { name: display_name } : null,
+          set_default: $("#m-default").checked,
+        },
+      });
+    }
+    ["#m-provider", "#m-url", "#m-model", "#m-name", "#m-key"].forEach((s) => {
+      const el = $(s);
+      if (el) el.value = "";
     });
-    ["#m-provider", "#m-model", "#m-name"].forEach((s) => ($(s).value = ""));
     $("#m-default").checked = false;
-    toast("Model added");
+    toast(`Model added: ${provider_id}/${model_id}`);
     loadModels();
   } catch (e) { toast(e.message, true); }
 });
