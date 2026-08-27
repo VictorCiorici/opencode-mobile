@@ -388,9 +388,10 @@ func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
 }
 
 // waitHealthy blocks until the instance port responds (or timeout) and
-// deregisters the instance if it never came up.
+// deregisters the instance if it never came up. The window is generous:
+// a cold opencode start on a mobile device can take well over ten seconds.
 func (m *Manager) waitHealthy(inst *Instance) *Instance {
-	deadline := time.Now().Add(12 * time.Second)
+	deadline := time.Now().Add(25 * time.Second)
 	for time.Now().Before(deadline) {
 		if isPortHealthy(inst.Port) {
 			return inst
@@ -1952,7 +1953,7 @@ func maskValue(k string, val interface{}) interface{} {
 func fetchLiveOpenCodeModels() map[string]interface{} {
 	cachePath := filepath.Join(cfg.DataDir, "models_cache.json")
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get("https://models.dev/api.json")
 	if err == nil {
 		if resp.StatusCode == 200 {

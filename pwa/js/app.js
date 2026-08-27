@@ -925,10 +925,17 @@ function initSettings() {
 
       const modelsTag = $("#status-models-tag");
       if (modelsTag) {
-        const count = M.all?.length || 93;
-        modelsTag.textContent = `● ${count} Models Active`;
-        modelsTag.style.background = count > 0 ? "var(--ok)" : "var(--muted)";
-        modelsTag.style.color = count > 0 ? "#04291a" : "#fff";
+        const count = M.all?.length || 0;
+        if (count > 0) {
+          const src = M.source ? ` (${M.source})` : "";
+          modelsTag.textContent = `● ${count} Models Active${src}`;
+          modelsTag.style.background = "var(--ok)";
+          modelsTag.style.color = "#04291a";
+        } else {
+          modelsTag.textContent = "● No Models";
+          modelsTag.style.background = "var(--muted)";
+          modelsTag.style.color = "#fff";
+        }
       }
 
       const zenTag = $("#status-zen-tag");
@@ -1791,6 +1798,7 @@ async function loadModels() {
       api(`/api/favorites`),
     ]);
     M.favorites = f.favorites || [];
+    M.source = d.source || "";
     M.all = [];
     for (const p of d.providers || [])
       for (const mid of Object.keys(p.models || {}))
