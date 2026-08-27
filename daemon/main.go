@@ -382,7 +382,12 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 	if _, err := os.Stat(loader); err == nil {
 		libs := filepath.Join(filepath.Dir(dir), "lib")
 		full := append([]string{"--library-path", libs, bin}, args...)
-		return exec.Command(loader, full...)
+		cmd := exec.Command(loader, full...)
+		// Android's app seccomp filter does not allowlist rseq(2), which
+		// glibc registers at startup — SIGSYS ("bad system call") without
+		// this. Harmless on kernels where it is allowed.
+		cmd.Env = append(os.Environ(), "GLIBC_TUNABLES=glibc.pthread.rseq=0")
+		return cmd
 	}
 	return exec.Command(bin, args...)
 }
