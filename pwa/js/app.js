@@ -232,16 +232,21 @@ async function loadSessions() {
     for (const ssn of S.sessions) {
       const cur = ssn.id === S.sid;
       const li = document.createElement("li");
-      li.innerHTML = `<div style="min-width:0">
-          <strong style="${cur ? "color:var(--accent)" : ""}">${esc(ssn.title || "Untitled")}</strong>
-          <small style="display:block;color:var(--muted);font-size:11px">${esc(ssn.id)} · ${esc((ssn.tokens?.input||0)+(ssn.tokens?.output||0)+" tok")}</small>
+      li.className = `session-card ${cur ? "cur" : ""}`;
+      li.innerHTML = `
+        <div class="session-info">
+          <div class="session-title-row">
+            <strong class="session-name" style="${cur ? "color:var(--accent)" : ""}">${esc(ssn.title || "Untitled")}</strong>
+            ${cur ? '<span class="session-badge">Active</span>' : ""}
+          </div>
+          <small class="session-meta">${esc(ssn.id)} · ${esc((ssn.tokens?.input||0)+(ssn.tokens?.output||0))} tok</small>
         </div>
-        <div class="git-btns">
-          <button data-a="open" class="ghost">${cur ? "Open" : "Open"}</button>
-          <button data-a="rename" class="ghost">✎</button>
-          <button data-a="fork" class="ghost">⑂</button>
-          <button data-a="share" class="ghost">🔗</button>
-          <button data-a="del" class="ghost">🗑</button>
+        <div class="session-actions">
+          <button data-a="open" class="${cur ? "primary" : "ghost"}">${cur ? "✓ Active" : "Open"}</button>
+          <button data-a="rename" class="ghost">✎ Rename</button>
+          <button data-a="fork" class="ghost">⑂ Fork</button>
+          <button data-a="share" class="ghost">🔗 Share</button>
+          <button data-a="del" class="ghost danger">🗑</button>
         </div>`;
       li.querySelectorAll("button").forEach((b) =>
         b.addEventListener("click", async () => {
