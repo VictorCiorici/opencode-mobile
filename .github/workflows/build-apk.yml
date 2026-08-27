@@ -22,17 +22,27 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Set up Python 3.11 for dependency vendoring
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: "8.5"
 
-      - name: Bundle Web and Server Assets into Android Assets
+      - name: Bundle Web, Server, and Vendor Assets
         run: |
           mkdir -p android/app/src/main/assets/web
-          mkdir -p android/app/src/main/assets/server
+          mkdir -p android/app/src/main/assets/server/vendor
           cp -r pwa/* android/app/src/main/assets/web/
           cp -r server/* android/app/src/main/assets/server/
+          rm -rf android/app/src/main/assets/server/__pycache__
+          
+          # Pre-vendor pure python dependencies for standalone execution
+          pip install --target android/app/src/main/assets/server/vendor fastapi uvicorn httpx pydantic starlette anyio
+
       - name: Setup Deterministic Signing Keystore
         run: |
           keytool -genkeypair -v -keystore android/app/debug.keystore \

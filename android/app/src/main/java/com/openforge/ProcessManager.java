@@ -40,13 +40,35 @@ public class ProcessManager {
             env.put("TMPDIR", context.getCacheDir().getAbsolutePath());
             env.put("OCMB_WORKSPACE", new File(filesDir, "projects").getAbsolutePath());
 
-            File binDir = new File(filesDir, "bin");
-            if (binDir.exists()) {
-                env.put("PATH", binDir.getAbsolutePath() + ":" + env.get("PATH"));
+            // Build PATH prioritizing internal bin, termux bin if present, and system bin
+            StringBuilder pathBuilder = new StringBuilder();
+            String[] searchBins = {
+                new File(filesDir, "bin").getAbsolutePath(),
+                new File(filesDir, "usr/bin").getAbsolutePath(),
+                new File(filesDir, "python/bin").getAbsolutePath(),
+                "/data/data/com.termux/files/usr/bin"
+            };
+
+            for (String p : searchBins) {
+                if (new File(p).exists()) {
+                    pathBuilder.append(p).append(":");
+                }
+            }
+            if (env.containsKey("PATH")) {
+                pathBuilder.append(env.get("PATH"));
+            }
+            env.put("PATH", pathBuilder.toString());
+
+            // Find python binary
+            String pythonBin = findExecutable("python3", searchBins);
+            if (pythonBin == null) {
+                pythonBin = findExecutable("python", searchBins);
+            }
+            if (pythonBin == null) {
+                pythonBin = "python3"; // fallback
             }
 
-            // Start bridge using python3 / uvicorn if available on system or bundled
-            String pythonBin = new File(binDir, "python3").exists() ? new File(binDir, "python3").getAbsolutePath() : "python3";
+            Log.i(TAG, "Using Python binary: " + pythonBin + " with PATH=" + pathBuilder);
 
             ProcessBuilder pb = new ProcessBuilder(
                 pythonBin, "-m", "uvicorn", "ocmb.main:app",
@@ -72,11 +94,21 @@ public class ProcessManager {
                 } catch (Exception ignored) {}
             }).start();
 
-            Log.i(TAG, "Bridge process started");
+            Log.i(TAG, "Bridge process spawned");
 
         } catch (Exception e) {
             Log.e(TAG, "Failed to start daemon processes", e);
         }
+    }
+
+    private static String findExecutable(String name, String[] searchPaths) {
+        for (String dir : searchPaths) {
+            File f = new File(dir, name);
+            if (f.exists() && f.canExecute()) {
+                return f.getAbsolutePath();
+            }
+        }
+        return null;
     }
 
     public synchronized void stopProcesses() {
@@ -95,8 +127,8 @@ public class ProcessManager {
         try {
             URL url = new URL(urlStr);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(600);
-            conn.setReadTimeout(600);
+            conn.setConnectTimeout(400);
+            conn.setReadTimeout(400);
             conn.setRequestMethod("GET");
             int code = conn.getResponseCode();
             return (code >= 200 && code < 400);

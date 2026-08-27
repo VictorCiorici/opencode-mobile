@@ -1,10 +1,16 @@
 """opencode-mobile bridge: HTTP API between the Android/PWA client and
-per-project `opencode serve` instances running inside this Debian proot."""
+per-project `opencode serve` instances running on-device or proot."""
 from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
+
+# Add bundled vendor libraries to python search path if present
+_vendor = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vendor"))
+if os.path.isdir(_vendor) and _vendor not in sys.path:
+    sys.path.insert(0, _vendor)
 
 import httpx
 from fastapi import FastAPI, Request, Response, Depends, HTTPException
