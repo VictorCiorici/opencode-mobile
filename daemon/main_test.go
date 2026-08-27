@@ -114,6 +114,58 @@ func srvPort(t *testing.T, srv *httptest.Server) int {
 	return p
 }
 
+func TestOpenCodeGoSubscriptionAuth(t *testing.T) {
+	tempCfg(t)
+	setTestGitIdentity(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	h := http.HandlerFunc(handleAuthToken)
+	w := do(h, "POST", "/api/auth/token", `{"provider_id":"opencode-go","token":"go_token_12345"}`, nil)
+	if w.Code != 200 {
+		t.Fatalf("save failed: %s", w.Body.String())
+	}
+
+	// Status exposes the Go subscription and never leaks the full token.
+	st := authStatusPayload()
+	goSt, ok := st["opencode-go"].(blob)
+	if !ok || goSt["configured"] != true {
+		t.Fatalf("opencode-go not in status: %v", st)
+	}
+	if pv, _ := goSt["preview"].(string); pv == "go_token_12345" {
+		t.Fatal("full token leaked in status preview")
+	}
+
+	// Persisted in auth.json with the shape `opencode auth login` writes.
+	b, _ := os.ReadFile(authJSONPath())
+	if !strings.Contains(string(b), `"opencode-go"`) || !strings.Contains(string(b), "go_token_12345") {
+		t.Fatalf("auth.json missing opencode-go entry: %s", b)
+	}
+
+	// Endpoint + token routing per subscription tier.
+	if got := subscriptionAPI("opencode-go"); got != "https://opencode.ai/zen/go/v1/chat/completions" {
+		t.Fatalf("go api wrong: %s", got)
+	}
+	if got := subscriptionAPI("opencode"); got != "https://opencode.ai/zen/v1/chat/completions" {
+		t.Fatalf("zen api wrong: %s", got)
+	}
+	if got := subscriptionToken(map[string]interface{}{"opencode-go": map[string]interface{}{"token": "xyz"}}, "opencode-go"); got != "xyz" {
+		t.Fatalf("token lookup wrong: %s", got)
+	}
+	t.Setenv("OPENCODE_API_KEY", "envkey")
+	if got := subscriptionToken(map[string]interface{}{}, "opencode-go"); got != "envkey" {
+		t.Fatalf("env fallback wrong: %s", got)
+	}
+
+	// Clearing the token removes the entry (env fallback neutralized first).
+	t.Setenv("OPENCODE_API_KEY", "")
+	do(h, "POST", "/api/auth/token", `{"provider_id":"opencode-go","token":""}`, nil)
+	if st2 := authStatusPayload(); st2["opencode-go"].(blob)["configured"] != false {
+		t.Fatal("opencode-go not cleared")
+	}
+}
+
 func TestSafeJoinRejectsTraversal(t *testing.T) {
 	dir := t.TempDir()
 	if p, err := safeJoin(dir, "../evil.txt"); err == nil || !strings.Contains(p, dir) && err == nil {

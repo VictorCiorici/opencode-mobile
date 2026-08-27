@@ -339,7 +339,7 @@ async def list_global_models(_: None = Depends(auth)):
     """No project open: browse the live model catalog (Zen et al.)."""
     live = await _live_catalog()
     providers = []
-    for pid in ("opencode", "google", "anthropic", "openai", "deepseek"):
+    for pid in ("opencode", "opencode-go", "google", "anthropic", "openai", "deepseek"):
         entry = live.get(pid)
         if isinstance(entry, dict):
             providers.append({

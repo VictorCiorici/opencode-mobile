@@ -2167,11 +2167,12 @@ func catalogProviders() []ProvInfo {
 		list = append(list, ProvInfo{ID: id, Name: name, Models: mMap, Source: source})
 	}
 
-	for _, id := range []string{"opencode", "google", "anthropic", "openai", "deepseek"} {
+	for _, id := range []string{"opencode", "opencode-go", "google", "anthropic", "openai", "deepseek"} {
 		if provLive, ok := allLiveProviders[id].(map[string]interface{}); ok {
 			names := map[string]string{
-				"opencode": "OpenCode Zen", "google": "Google Gemini",
-				"anthropic": "Anthropic", "openai": "OpenAI", "deepseek": "DeepSeek",
+				"opencode": "OpenCode Zen", "opencode-go": "OpenCode Go",
+				"google": "Google Gemini", "anthropic": "Anthropic",
+				"openai": "OpenAI", "deepseek": "DeepSeek",
 			}
 			appendProv(id, provLive, names[id])
 		}
@@ -2424,6 +2425,10 @@ func authStatusPayload() blob {
 		return ""
 	}
 	opencodeToken := getTok("opencode")
+	opencodeGoToken := getTok("opencode-go")
+	if opencodeGoToken == "" {
+		opencodeGoToken = os.Getenv("OPENCODE_API_KEY")
+	}
 	githubToken := getTok("github")
 	name, email := gitIdentity()
 
@@ -2435,6 +2440,7 @@ func authStatusPayload() blob {
 
 	payload := blob{
 		"opencode":       blob{"configured": opencodeToken != "", "preview": maskSecret(opencodeToken)},
+		"opencode-go":    blob{"configured": opencodeGoToken != "", "preview": maskSecret(opencodeGoToken)},
 		"github":         blob{"configured": githubToken != "", "preview": maskSecret(githubToken)},
 		"git_user":       map[string]string{"name": name, "email": email},
 		"opencode_local": findOpenCodeBinary() != "",
@@ -2463,9 +2469,16 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	tok := strings.TrimSpace(req.Token)
 
 	switch provider {
-	case "opencode":
+	case "opencode", "opencode-go":
+		// Subscription providers (Zen / OpenCode Go) authenticate via a token
+		// in ~/.local/share/opencode/auth.json keyed by provider id — the
+		// same shape `opencode auth login` writes.
 		authData := readAuthJSON()
-		authData["opencode"] = blob{"type": "api", "token": tok}
+		if tok == "" {
+			delete(authData, provider)
+		} else {
+			authData[provider] = blob{"type": "api", "token": tok}
+		}
 		writeAuthJSON(authData)
 	case "github":
 		authData := readAuthJSON()
@@ -2618,12 +2631,38 @@ func saveMessages(pid, sid string, list []SessionMsg) {
 	os.WriteFile(getMessagesFilePath(pid, sid), b, 0644)
 }
 
-// executeAICall performs a chat completion via the OpenCode Zen cloud API so
-// the standalone (engine-less) mode still offers real AI responses when the
-// user configured a Zen token. Errors come back as readable assistant text.
-func executeAICall(zenToken, model, prompt string) string {
-	if zenToken == "" {
-		return "⚠️ **OpenCode Zen Token Not Set**\n\nPlease go to **Settings ⚙️ ➔ AI Credentials & API Keys** and paste your OpenCode Zen Key (`zen_live_...`) to enable full AI coding and reasoning capabilities."
+// subscriptionAPI maps an opencode subscription provider id to its
+// OpenAI-compatible chat completions endpoint (per models.dev).
+func subscriptionAPI(providerID string) string {
+	if providerID == "opencode-go" {
+		return "https://opencode.ai/zen/go/v1/chat/completions"
+	}
+	return "https://opencode.ai/zen/v1/chat/completions"
+}
+
+// subscriptionToken resolves the stored token for a subscription provider.
+func subscriptionToken(authData map[string]interface{}, providerID string) string {
+	if obj, ok := authData[providerID].(map[string]interface{}); ok {
+		if t, ok := obj["token"].(string); ok && t != "" {
+			return t
+		}
+	}
+	if providerID == "opencode-go" {
+		return os.Getenv("OPENCODE_API_KEY")
+	}
+	return ""
+}
+
+// executeAICall performs a chat completion via an opencode subscription
+// (OpenCode Zen or OpenCode Go) so the standalone (engine-less) mode still
+// offers real AI responses. Errors come back as readable assistant text.
+func executeAICall(providerID, token, model, prompt string) string {
+	if token == "" {
+		label := "OpenCode Zen Token"
+		if providerID == "opencode-go" {
+			label = "OpenCode Go Token"
+		}
+		return fmt.Sprintf("⚠️ **%s Not Set**\n\nPlease go to **Settings ⚙️ ➔ AI Credentials & API Keys** and paste your token to enable full AI coding and reasoning capabilities.", label)
 	}
 
 	client := &http.Client{Timeout: 90 * time.Second}
@@ -2635,11 +2674,11 @@ func executeAICall(zenToken, model, prompt string) string {
 		},
 	})
 
-	req, err := http.NewRequest("POST", "https://opencode.ai/api/v1/chat/completions", bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", subscriptionAPI(providerID), bytes.NewBuffer(reqBody))
 	if err != nil {
 		return fmt.Sprintf("Request creation error: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+zenToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
@@ -2670,20 +2709,26 @@ func executeAICall(zenToken, model, prompt string) string {
 	return truncate(string(bodyBytes), 2000)
 }
 
-// runStandaloneCompletion resolves the Zen token and fills in the pending
-// assistant message stored under asstID.
-func runStandaloneCompletion(pid, sid, asstID, model, prompt string) {
+// runStandaloneCompletion resolves the subscription token for the requested
+// provider and fills in the pending assistant message stored under asstID.
+func runStandaloneCompletion(pid, sid, asstID, providerID, model, prompt string) {
 	home, _ := os.UserHomeDir()
 	authData := readAuthJSONViaPath(filepath.Join(home, ".local/share/opencode/auth.json"))
-	zenToken := ""
-	if obj, ok := authData["opencode"].(map[string]interface{}); ok {
-		zenToken, _ = obj["token"].(string)
+
+	// Only opencode subscription providers are handled here; anything else
+	// (e.g. a BYOK key) falls back to Zen, matching the cloud engine.
+	if providerID != "opencode" && providerID != "opencode-go" {
+		providerID = "opencode"
 	}
 	if model == "" {
-		model = "claude-3-7-sonnet"
+		if providerID == "opencode-go" {
+			model = "glm-5.3-flash"
+		} else {
+			model = "claude-3-7-sonnet"
+		}
 	}
 
-	reply := executeAICall(zenToken, model, prompt)
+	reply := executeAICall(providerID, subscriptionToken(authData, providerID), model, prompt)
 	compTime := time.Now().UnixMilli()
 
 	all := loadMessages(pid, sid)
@@ -2860,7 +2905,7 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 
 				// Complete via the Zen cloud API in the background; the UI's
 				// polling loop picks up the finished message automatically.
-				go runStandaloneCompletion(pid, sid, asstMsgID, req.Model.ModelID, userText)
+				go runStandaloneCompletion(pid, sid, asstMsgID, req.Model.ProviderID, req.Model.ModelID, userText)
 
 				writeJSON(w, http.StatusOK, blob{"ok": true, "sessionID": sid})
 				return

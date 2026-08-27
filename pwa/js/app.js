@@ -895,6 +895,12 @@ function initSettings() {
         ghTag.style.background = st.github?.configured ? "var(--ok)" : "var(--muted)";
         ghTag.style.color = st.github?.configured ? "#04291a" : "#fff";
       }
+      const goTag = $("#auth-tag-opencodego");
+      if (goTag) {
+        goTag.textContent = st["opencode-go"]?.configured ? `configured (${st["opencode-go"].preview})` : "not set";
+        goTag.style.background = st["opencode-go"]?.configured ? "var(--ok)" : "var(--muted)";
+        goTag.style.color = st["opencode-go"]?.configured ? "#04291a" : "#fff";
+      }
 
       // System & Engine Status Cards
       const daemonTag = $("#status-daemon-tag");
@@ -957,6 +963,7 @@ function initSettings() {
     }
   }
   $("#btn-paste-opencode")?.addEventListener("click", () => pasteTo("#key-opencode"));
+  $("#btn-paste-opencodego")?.addEventListener("click", () => pasteTo("#key-opencodego"));
   $("#btn-paste-gemini")?.addEventListener("click", () => pasteTo("#key-gemini"));
   $("#btn-paste-github")?.addEventListener("click", () => pasteTo("#key-github"));
   $("#btn-paste-custom")?.addEventListener("click", () => pasteTo("#key-provider-val"));
@@ -969,6 +976,17 @@ function initSettings() {
       await api("/api/auth/token", { method: "POST", body: { provider_id: "opencode", token } });
       $("#key-opencode").value = "";
       toast("OpenCode Zen token saved ✓");
+      loadAuthStatus();
+    } catch (e) { toast(e.message, true); }
+  });
+
+  $("#btn-save-opencodego-key")?.addEventListener("click", async () => {
+    const token = $("#key-opencodego").value.trim();
+    if (!token) return toast("Enter an OpenCode Go key", true);
+    try {
+      await api("/api/auth/token", { method: "POST", body: { provider_id: "opencode-go", token } });
+      $("#key-opencodego").value = "";
+      toast("OpenCode Go subscription key saved ✓");
       loadAuthStatus();
     } catch (e) { toast(e.message, true); }
   });

@@ -48,6 +48,7 @@ def get_auth_status() -> dict[str, Any]:
     providers_cfg = cfg.get("provider", {})
     
     opencode_token = auth_data.get("opencode", {}).get("token", "")
+    opencode_go_token = auth_data.get("opencode-go", {}).get("token", "") or os.environ.get("OPENCODE_API_KEY", "")
     github_token = auth_data.get("github", {}).get("token", "")
     gemini_key = providers_cfg.get("gemini", {}).get("options", {}).get("apiKey", "") or os.environ.get("GEMINI_API_KEY", "")
     openai_key = providers_cfg.get("openai", {}).get("options", {}).get("apiKey", "") or os.environ.get("OPENAI_API_KEY", "")
@@ -66,6 +67,7 @@ def get_auth_status() -> dict[str, Any]:
 
     return {
         "opencode": {"configured": bool(opencode_token), "preview": mask_token(opencode_token)},
+        "opencode-go": {"configured": bool(opencode_go_token), "preview": mask_token(opencode_go_token)},
         "github": {"configured": bool(github_token), "preview": mask_token(github_token)},
         "git_user": {"name": _git_identity("user.name"), "email": _git_identity("user.email")},
         "gemini": {"configured": bool(gemini_key), "preview": mask_token(gemini_key)},
@@ -91,6 +93,19 @@ def save_provider_key(provider_id: str, api_key: str, base_url: str | None = Non
     and (merged, never clobbered) into ~/.git-credentials for private clones,
     matching the Go daemon behaviour.
     """
+    if provider_id in ("opencode", "opencode-go"):
+        # Subscription providers authenticate via auth.json, keyed by id —
+        # the same shape `opencode auth login` writes.
+        data = _read_json(AUTH_PATH)
+        token = api_key.strip()
+        if token:
+            data[provider_id] = {"type": "api", "token": token}
+            _write_json(AUTH_PATH, data)
+        else:
+            data.pop(provider_id, None)
+            _write_json(AUTH_PATH, data)
+        return get_auth_status()
+
     if provider_id == "github":
         data = _read_json(AUTH_PATH)
         token = api_key.strip()
