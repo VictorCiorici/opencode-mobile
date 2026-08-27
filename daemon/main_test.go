@@ -144,10 +144,10 @@ func TestOpenCodeGoSubscriptionAuth(t *testing.T) {
 	}
 
 	// Endpoint + token routing per subscription tier.
-	if got := subscriptionAPI("opencode-go"); got != "https://opencode.ai/zen/go/v1/chat/completions" {
+	if got := cloudEndpoint("opencode-go"); got != "https://opencode.ai/zen/go/v1/chat/completions" {
 		t.Fatalf("go api wrong: %s", got)
 	}
-	if got := subscriptionAPI("opencode"); got != "https://opencode.ai/zen/v1/chat/completions" {
+	if got := cloudEndpoint("opencode"); got != "https://opencode.ai/zen/v1/chat/completions" {
 		t.Fatalf("zen api wrong: %s", got)
 	}
 	if got := subscriptionToken(map[string]interface{}{"opencode-go": map[string]interface{}{"token": "xyz"}}, "opencode-go"); got != "xyz" {

@@ -2,7 +2,10 @@ package com.openforge;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Build;
 import android.util.Log;
+
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -18,6 +21,7 @@ import java.util.UUID;
 public class ProcessManager {
     private static final String TAG = "ProcessManager";
     private static final int PORT = 8787;
+    private static final String PID_FILE = "daemon.pid";
     private static ProcessManager instance;
     private Process bridgeProcess;
 
@@ -39,11 +43,96 @@ public class ProcessManager {
         return token;
     }
 
-    public synchronized void startProcesses(Context context) {
-        if (isServerHealthy("http://127.0.0.1:" + PORT + "/api/health")) {
-            Log.i(TAG, "Bridge server is already healthy on 127.0.0.1:" + PORT);
+    private static String httpGetBody(String urlStr, int timeoutMs) {
+        try {
+            HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            conn.setConnectTimeout(timeoutMs);
+            conn.setReadTimeout(timeoutMs);
+            if (conn.getResponseCode() != 200) return null;
+            try (InputStream in = conn.getInputStream()) {
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = in.read(buf)) != -1) bos.write(buf, 0, n);
+                return bos.toString("UTF-8");
+            }
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** The daemon stamps its build version into /api/health. */
+    private static String runningDaemonVersion() {
+        String body = httpGetBody("http://127.0.0.1:" + PORT + "/api/health", 400);
+        if (body == null) return null;
+        try {
+            return new JSONObject(body).optString("daemon_version", "");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static File pidFile(Context context) {
+        return new File(context.getFilesDir(), PID_FILE);
+    }
+
+    private static int readStalePid(Context context) {
+        File f = pidFile(context);
+        if (!f.exists()) return -1;
+        try (java.util.Scanner sc = new java.util.Scanner(f)) {
+            if (!sc.hasNextLine()) return -1;
+            return Integer.parseInt(sc.nextLine().trim());
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Kills a daemon orphaned by a previous APK update. Native children can
+     * outlive the app process, and a healthy-but-old daemon would otherwise
+     * block the new binary from ever starting ("already healthy" shortcut).
+     */
+    private static void killStaleDaemon(Context context, String expectedVersion) {
+        String running = runningDaemonVersion();
+        if (running != null && expectedVersion.equals(running)) {
+            Log.i(TAG, "Running daemon is current (" + running + "), reusing it");
             return;
         }
+        int stalePid = readStalePid(context);
+        if (stalePid > 0) {
+            Log.w(TAG, "Killing stale daemon pid=" + stalePid + " version=" + running);
+            try {
+                android.os.Process.killProcess(stalePid);
+            } catch (Exception e) {
+                Log.w(TAG, "killProcess failed for " + stalePid, e);
+            }
+            // Wait for the port to actually free up.
+            for (int i = 0; i < 20; i++) {
+                if (runningDaemonVersion() == null) break;
+                try { Thread.sleep(150); } catch (InterruptedException ignored) { return; }
+            }
+        }
+    }
+
+    public synchronized void startProcesses(Context context) {
+        String myVersion;
+        try {
+            myVersion = context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            myVersion = "unknown";
+        }
+
+        if (isServerHealthy("http://127.0.0.1:" + PORT + "/api/health")) {
+            String running = runningDaemonVersion();
+            if (myVersion.equals(running)) {
+                Log.i(TAG, "Bridge server is already healthy on 127.0.0.1:" + PORT);
+                return;
+            }
+            Log.w(TAG, "Port " + PORT + " served by a different daemon (version="
+                    + running + ", app=" + myVersion + ") — replacing it");
+        }
+        killStaleDaemon(context, myVersion);
 
         File filesDir = context.getFilesDir();
         File webDir = new File(filesDir, "pwa");
@@ -88,6 +177,7 @@ public class ProcessManager {
                 cmd.add("-workspace"); cmd.add(workspacePath);
                 cmd.add("-data"); cmd.add(new File(filesDir, "data").getAbsolutePath());
                 cmd.add("-token"); cmd.add(token);
+                cmd.add("-version"); cmd.add(myVersion);
                 if (webDir.exists()) {
                     cmd.add("-web"); cmd.add(webDir.getAbsolutePath());
                 }
@@ -103,6 +193,7 @@ public class ProcessManager {
             pb.redirectErrorStream(true);
 
             bridgeProcess = pb.start();
+            writePidFile(context, bridgeProcess);
 
             // Pipe daemon logs to file for debugging
             new Thread(() -> {
@@ -121,6 +212,16 @@ public class ProcessManager {
         } catch (Exception e) {
             Log.e(TAG, "Failed to launch native daemon process", e);
         }
+    }
+
+    private static void writePidFile(Context context, Process p) {
+        try {
+            long pid = p.pid(); // API 26+; below that the file simply stays absent
+            if (pid <= 0) return;
+            FileOutputStream out = new FileOutputStream(pidFile(context), false);
+            out.write(String.valueOf(pid).getBytes("UTF-8"));
+            out.close();
+        } catch (Throwable ignored) {}
     }
 
     public synchronized void stopProcesses() {

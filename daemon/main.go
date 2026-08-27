@@ -37,6 +37,7 @@ type Config struct {
 	DataDir      string
 	WebDir       string
 	Token        string
+	Version      string
 }
 
 var (
@@ -44,6 +45,10 @@ var (
 	lock    sync.Mutex
 	instMgr *Manager
 )
+
+// daemonVersion is stamped by the Android host on launch (-version) so a
+// stale orphaned daemon from a previous APK can be detected and replaced.
+const daemonVersion = "0.4.0"
 
 func main() {
 	home, _ := os.UserHomeDir()
@@ -61,6 +66,7 @@ func main() {
 	flag.StringVar(&cfg.DataDir, "data", filepath.Join(home, ".local/share/opencode-mobile"), "Data directory")
 	flag.StringVar(&cfg.WebDir, "web", "", "Web static directory")
 	flag.StringVar(&cfg.Token, "token", os.Getenv("OCMB_TOKEN"), "Require bearer token for API access (empty disables auth)")
+	flag.StringVar(&cfg.Version, "version", daemonVersion, "Daemon version reported via /api/health")
 	flag.Parse()
 
 	os.MkdirAll(cfg.WorkspaceDir, 0755)
@@ -455,6 +461,23 @@ func (m *Manager) Stop(pid string) bool {
 	return false
 }
 
+// StopAll kills every managed instance (incl. the shared catalog instance)
+// so the next request respawns them — used after credential changes.
+func (m *Manager) StopAll() {
+	m.mu.Lock()
+	instances := make([]*Instance, 0, len(m.instances))
+	for pid, inst := range m.instances {
+		instances = append(instances, inst)
+		delete(m.instances, pid)
+	}
+	m.mu.Unlock()
+	for _, inst := range instances {
+		if inst.Cmd != nil && inst.Cmd.Process != nil {
+			inst.Cmd.Process.Kill()
+		}
+	}
+}
+
 func (m *Manager) reapLoop() {
 	for range time.Tick(5 * time.Minute) {
 		m.mu.Lock()
@@ -497,8 +520,9 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, blob{
-		"bridge": "ok",
-		"auth":   cfg.Token != "",
+		"bridge":         "ok",
+		"auth":           cfg.Token != "",
+		"daemon_version": cfg.Version,
 		"opencode": blob{
 			"healthy": engineFound || sharedHealthy,
 			"local":   engineFound,
@@ -2480,6 +2504,8 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 			authData[provider] = blob{"type": "api", "token": tok}
 		}
 		writeAuthJSON(authData)
+		// Drop running engine instances so they respawn with the new creds.
+		instMgr.StopAll()
 	case "github":
 		authData := readAuthJSON()
 		if tok == "" {
@@ -2519,6 +2545,8 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// Engine instances cache provider config at spawn time.
+		instMgr.StopAll()
 	}
 
 	writeJSON(w, http.StatusOK, blob{"ok": true, "status": authStatusPayload()})
@@ -2631,15 +2659,6 @@ func saveMessages(pid, sid string, list []SessionMsg) {
 	os.WriteFile(getMessagesFilePath(pid, sid), b, 0644)
 }
 
-// subscriptionAPI maps an opencode subscription provider id to its
-// OpenAI-compatible chat completions endpoint (per models.dev).
-func subscriptionAPI(providerID string) string {
-	if providerID == "opencode-go" {
-		return "https://opencode.ai/zen/go/v1/chat/completions"
-	}
-	return "https://opencode.ai/zen/v1/chat/completions"
-}
-
 // subscriptionToken resolves the stored token for a subscription provider.
 func subscriptionToken(authData map[string]interface{}, providerID string) string {
 	if obj, ok := authData[providerID].(map[string]interface{}); ok {
@@ -2653,16 +2672,44 @@ func subscriptionToken(authData map[string]interface{}, providerID string) strin
 	return ""
 }
 
-// executeAICall performs a chat completion via an opencode subscription
-// (OpenCode Zen or OpenCode Go) so the standalone (engine-less) mode still
+// cloudEndpoint maps a provider id to its OpenAI-compatible chat endpoint.
+func cloudEndpoint(providerID string) string {
+	switch providerID {
+	case "opencode-go":
+		// OpenCode Go subscription.
+		return "https://opencode.ai/zen/go/v1/chat/completions"
+	case "google", "gemini":
+		// Google Gemini (OpenAI-compatible surface).
+		return "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+	default:
+		// OpenCode Zen subscription.
+		return "https://opencode.ai/zen/v1/chat/completions"
+	}
+}
+
+// cloudTokenFor resolves the stored API token for a cloud provider.
+func cloudTokenFor(providerID string) string {
+	switch providerID {
+	case "opencode", "opencode-go":
+		home, _ := os.UserHomeDir()
+		authData := readAuthJSONViaPath(filepath.Join(home, ".local/share/opencode/auth.json"))
+		return subscriptionToken(authData, providerID)
+	case "google", "gemini":
+		if k := lookupProviderKey("gemini"); k != "" {
+			return k
+		}
+		return os.Getenv("GEMINI_API_KEY")
+	default:
+		return lookupProviderKey(providerID)
+	}
+}
+
+// executeAICall performs a chat completion via a cloud provider (OpenCode
+// Zen, OpenCode Go, or Gemini) so the standalone (engine-less) mode still
 // offers real AI responses. Errors come back as readable assistant text.
 func executeAICall(providerID, token, model, prompt string) string {
 	if token == "" {
-		label := "OpenCode Zen Token"
-		if providerID == "opencode-go" {
-			label = "OpenCode Go Token"
-		}
-		return fmt.Sprintf("⚠️ **%s Not Set**\n\nPlease go to **Settings ⚙️ ➔ AI Credentials & API Keys** and paste your token to enable full AI coding and reasoning capabilities.", label)
+		return "⚠️ **API Key Not Set**\n\nPlease go to **Settings ⚙️ ➔ AI Credentials & API Keys** and paste the key for `" + providerID + "` to enable full AI coding and reasoning capabilities."
 	}
 
 	client := &http.Client{Timeout: 90 * time.Second}
@@ -2674,7 +2721,7 @@ func executeAICall(providerID, token, model, prompt string) string {
 		},
 	})
 
-	req, err := http.NewRequest("POST", subscriptionAPI(providerID), bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", cloudEndpoint(providerID), bytes.NewBuffer(reqBody))
 	if err != nil {
 		return fmt.Sprintf("Request creation error: %v", err)
 	}
@@ -2709,26 +2756,27 @@ func executeAICall(providerID, token, model, prompt string) string {
 	return truncate(string(bodyBytes), 2000)
 }
 
-// runStandaloneCompletion resolves the subscription token for the requested
+// runStandaloneCompletion resolves the cloud token for the requested
 // provider and fills in the pending assistant message stored under asstID.
 func runStandaloneCompletion(pid, sid, asstID, providerID, model, prompt string) {
-	home, _ := os.UserHomeDir()
-	authData := readAuthJSONViaPath(filepath.Join(home, ".local/share/opencode/auth.json"))
-
-	// Only opencode subscription providers are handled here; anything else
-	// (e.g. a BYOK key) falls back to Zen, matching the cloud engine.
-	if providerID != "opencode" && providerID != "opencode-go" {
+	// Zen / Go / Gemini are handled natively; other BYOK providers fall back
+	// to the Zen engine, matching the cloud config layout.
+	if providerID != "opencode" && providerID != "opencode-go" &&
+		providerID != "google" && providerID != "gemini" {
 		providerID = "opencode"
 	}
 	if model == "" {
-		if providerID == "opencode-go" {
+		switch providerID {
+		case "opencode-go":
 			model = "glm-5.3-flash"
-		} else {
+		case "google", "gemini":
+			model = "gemini-2.5-flash"
+		default:
 			model = "claude-3-7-sonnet"
 		}
 	}
 
-	reply := executeAICall(providerID, subscriptionToken(authData, providerID), model, prompt)
+	reply := executeAICall(providerID, cloudTokenFor(providerID), model, prompt)
 	compTime := time.Now().UnixMilli()
 
 	all := loadMessages(pid, sid)

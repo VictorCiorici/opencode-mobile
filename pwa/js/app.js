@@ -938,6 +938,14 @@ function initSettings() {
         zenTag.style.color = st.opencode?.configured ? "#04291a" : "#fff";
       }
 
+      const goStatusTag = $("#status-go-tag");
+      if (goStatusTag) {
+        const cfg = st["opencode-go"]?.configured;
+        goStatusTag.textContent = cfg ? `configured (${st["opencode-go"].preview})` : "not set";
+        goStatusTag.style.background = cfg ? "var(--ok)" : "var(--muted)";
+        goStatusTag.style.color = cfg ? "#04291a" : "#fff";
+      }
+
       if (st.git_user) {
         if ($("#git-user-name") && st.git_user.name && !$("#git-user-name").value) {
           $("#git-user-name").value = st.git_user.name;
@@ -946,7 +954,12 @@ function initSettings() {
           $("#git-user-email").value = st.git_user.email;
         }
       }
-    } catch {}
+    } catch (e) {
+      if (!loadAuthStatus._warned || Date.now() - loadAuthStatus._warned > 15000) {
+        loadAuthStatus._warned = Date.now();
+        toast("Auth status unavailable: " + (e.message || "bridge unreachable"), true);
+      }
+    }
   }
   // Clipboard paste helpers
   async function pasteTo(selector) {
@@ -977,6 +990,7 @@ function initSettings() {
       $("#key-opencode").value = "";
       toast("OpenCode Zen token saved ✓");
       loadAuthStatus();
+      loadModels().catch(() => {});   // engine/catalog list may change
     } catch (e) { toast(e.message, true); }
   });
 
@@ -988,6 +1002,7 @@ function initSettings() {
       $("#key-opencodego").value = "";
       toast("OpenCode Go subscription key saved ✓");
       loadAuthStatus();
+      loadModels().catch(() => {});
     } catch (e) { toast(e.message, true); }
   });
 
@@ -999,6 +1014,7 @@ function initSettings() {
       $("#key-gemini").value = "";
       toast("Gemini API key saved ✓");
       loadAuthStatus();
+      loadModels().catch(() => {});
     } catch (e) { toast(e.message, true); }
   });
 
@@ -1033,6 +1049,7 @@ function initSettings() {
       $("#key-provider-val").value = "";
       toast(`${provider_id.toUpperCase()} API key saved ✓`);
       loadAuthStatus();
+      loadModels().catch(() => {});
     } catch (e) { toast(e.message, true); }
   });
 
