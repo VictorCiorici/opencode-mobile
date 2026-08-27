@@ -27,6 +27,17 @@ func tempCfg(t *testing.T) {
 	instMgr = NewManager()
 }
 
+// setTestGitIdentity gives spawned `git commit` calls (including ones run
+// inside the daemon under test) an author identity — required on CI runners
+// where no global git config exists.
+func setTestGitIdentity(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_AUTHOR_NAME", "test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+}
+
 func TestSafeJoinRejectsTraversal(t *testing.T) {
 	dir := t.TempDir()
 	if p, err := safeJoin(dir, "../evil.txt"); err == nil || !strings.Contains(p, dir) && err == nil {
@@ -77,6 +88,7 @@ func jsonBody(t *testing.T, w *httptest.ResponseRecorder) map[string]interface{}
 
 func TestProjectsCRUDAndRegistrySlug(t *testing.T) {
 	tempCfg(t)
+	setTestGitIdentity(t) // project creation runs an initial git commit
 	h := http.HandlerFunc(handleProjects)
 
 	w := do(h, "POST", "/api/projects", `{"name":"My App!","branch":"main"}`, nil)
@@ -144,6 +156,7 @@ func registerProject(t *testing.T, path string) string {
 
 func TestGitWorkflows(t *testing.T) {
 	tempCfg(t)
+	setTestGitIdentity(t)
 	repo := makeGitRepo(t)
 	pid := registerProject(t, repo)
 	h := http.HandlerFunc(handleGit)
