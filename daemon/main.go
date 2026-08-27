@@ -1949,39 +1949,6 @@ func maskValue(k string, val interface{}) interface{} {
 	return deepCopyMasked(val)
 }
 
-func getFallbackOpenCodeModels() map[string]interface{} {
-	// Offline-safe catalog used when models.dev is unreachable and no cache
-	// exists yet, so model browsing always has something to show.
-	return map[string]interface{}{
-		"opencode": map[string]interface{}{
-			"id":   "opencode",
-			"name": "OpenCode Zen",
-			"models": map[string]interface{}{
-				"claude-3-7-sonnet": blob{"name": "Claude 3.7 Sonnet (Thinking)"},
-				"claude-3-5-sonnet": blob{"name": "Claude 3.5 Sonnet"},
-				"claude-3-5-haiku":  blob{"name": "Claude 3.5 Haiku"},
-				"gemini-2.5-pro":    blob{"name": "Gemini 2.5 Pro"},
-				"gemini-2.5-flash":  blob{"name": "Gemini 2.5 Flash"},
-				"gpt-4o":            blob{"name": "GPT-4o"},
-				"o3-mini":           blob{"name": "o3-mini"},
-				"deepseek-r1":       blob{"name": "DeepSeek R1 (Reasoning)"},
-				"deepseek-v3":       blob{"name": "DeepSeek V3"},
-				"qwen-2.5-coder":    blob{"name": "Qwen 2.5 Coder"},
-				"glm-4.7":           blob{"name": "GLM 4.7"},
-				"minimax-m3":        blob{"name": "MiniMax M3"},
-			},
-		},
-		"google": map[string]interface{}{
-			"id":   "google",
-			"name": "Google Gemini",
-			"models": map[string]interface{}{
-				"gemini-2.5-pro":   blob{"name": "Gemini 2.5 Pro"},
-				"gemini-2.5-flash": blob{"name": "Gemini 2.5 Flash"},
-			},
-		},
-	}
-}
-
 func fetchLiveOpenCodeModels() map[string]interface{} {
 	cachePath := filepath.Join(cfg.DataDir, "models_cache.json")
 
@@ -2008,7 +1975,7 @@ func fetchLiveOpenCodeModels() map[string]interface{} {
 	if len(cachedData) > 0 {
 		return cachedData
 	}
-	return getFallbackOpenCodeModels()
+	return map[string]interface{}{}
 }
 
 // ProvInfo is the PWA-facing provider entry. Models is always a map keyed by
