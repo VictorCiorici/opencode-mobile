@@ -524,13 +524,23 @@ func isPortHealthy(port int) bool {
 // ---------------------------------------------------------------- Health ---
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	engineFound := findOpenCodeBinary() != ""
+	enginePath := findOpenCodeBinary()
+	engineFound := enginePath != ""
 	sharedHealthy := isPortHealthy(4096) // shared instance used by the Termux flow
 	version := ""
+	engineErr := ""
 	if engineFound {
-		out, err := exec.Command(findOpenCodeBinary(), "--version").Output()
+		out, err := exec.Command(enginePath, "--version").Output()
 		if err == nil {
 			version = strings.TrimSpace(string(out))
+		} else {
+			// Surface exec failures (SELinux W^X, truncated extraction, …)
+			// so the client can diagnose without shell access.
+			if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+				engineErr = strings.TrimSpace(string(ee.Stderr))
+			} else {
+				engineErr = err.Error()
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, blob{
@@ -542,6 +552,8 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 			"local":   engineFound,
 			"shared":  sharedHealthy,
 			"version": version,
+			"path":    enginePath,
+			"error":   engineErr,
 		},
 	})
 }

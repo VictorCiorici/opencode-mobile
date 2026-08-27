@@ -1133,7 +1133,10 @@ function initSettings() {
     $("#about-box").innerHTML =
       `OpenForge v${esc(h.daemon_version || "?")} · bridge <b>${h.bridge}</b><br>` +
       `opencode ${esc(h.opencode?.version || "?")} — ` +
-      `${h.opencode?.healthy ? "healthy ✓" : "<span style='color:var(--err)'>offline</span>"}`;
+      `${h.opencode?.healthy ? "healthy ✓" : "<span style='color:var(--err)'>offline</span>"}` +
+      (h.opencode?.error
+        ? `<br><span style='color:var(--err)'>${esc(h.opencode.error)}</span>`
+        : "");
   }).catch(() => { $("#about-box").textContent = "Bridge unreachable"; });
 }
 
