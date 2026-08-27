@@ -1557,12 +1557,12 @@ $("#btn-probe-host")?.addEventListener("click", async () => {
 });
 
 async function loadModels() {
-  if (!S.pid) return;
+  const pid = S.pid || "global";
   const ul = $("#model-list");
   ul.innerHTML = `<li>Loading…</li>`;
   try {
     const [d, f] = await Promise.all([
-      api(`/api/models/${S.pid}`),
+      api(`/api/models/${pid}`),
       api(`/api/favorites`),
     ]);
     M.favorites = f.favorites || [];
@@ -1809,7 +1809,8 @@ setInterval(async () => {
 (async function boot() {
   applySettings();
   initSettings();
+  loadModels().catch(() => {});
   await loadProjects();
-  if (S.pid) { ensureSession(); loadModels().catch(() => {}); }
+  if (S.pid) { ensureSession(); }
   else pushMsg("system", "Welcome to OpenForge 👋\nGo to **Projects** to create your first project.");
 })();

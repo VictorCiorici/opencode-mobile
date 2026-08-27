@@ -816,24 +816,12 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 
 	home, _ := os.UserHomeDir()
 	cfgPath := filepath.Join(home, ".config/opencode/opencode.json")
-	authPath := filepath.Join(home, ".local/share/opencode/auth.json")
 
 	var fullCfg map[string]interface{}
 	b, _ := os.ReadFile(cfgPath)
 	json.Unmarshal(b, &fullCfg)
 	if fullCfg == nil {
 		fullCfg = map[string]interface{}{}
-	}
-
-	var authData map[string]map[string]interface{}
-	ab, _ := os.ReadFile(authPath)
-	json.Unmarshal(ab, &authData)
-
-	hasZenToken := false
-	if authData != nil && authData["opencode"] != nil {
-		if tok, ok := authData["opencode"]["token"].(string); ok && tok != "" {
-			hasZenToken = true
-		}
 	}
 
 	type ProvInfo struct {
@@ -854,23 +842,34 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		mMap, _ := opencodeLive["models"].(map[string]interface{})
 		list = append(list, ProvInfo{ID: "opencode", Name: name, Models: mMap})
-	} else if hasZenToken {
-		list = append(list, ProvInfo{ID: "opencode", Name: "OpenCode Zen", Models: map[string]interface{}{}})
 	}
 
-	// 2. Dynamic Google Gemini models from models.dev if configured
-	if os.Getenv("GEMINI_API_KEY") != "" {
-		if googleLive, ok := allLiveProviders["google"].(map[string]interface{}); ok {
-			name, _ := googleLive["name"].(string)
-			mMap, _ := googleLive["models"].(map[string]interface{})
-			list = append(list, ProvInfo{ID: "google", Name: name, Models: mMap})
+	// 2. Google Gemini models from models.dev
+	if googleLive, ok := allLiveProviders["google"].(map[string]interface{}); ok {
+		name, _ := googleLive["name"].(string)
+		if name == "" {
+			name = "Google Gemini"
+		}
+		mMap, _ := googleLive["models"].(map[string]interface{})
+		list = append(list, ProvInfo{ID: "google", Name: name, Models: mMap})
+	}
+
+	// 3. Other standard providers from models.dev
+	for _, provID := range []string{"anthropic", "openai", "deepseek"} {
+		if provLive, ok := allLiveProviders[provID].(map[string]interface{}); ok {
+			name, _ := provLive["name"].(string)
+			if name == "" {
+				name = strings.Title(provID)
+			}
+			mMap, _ := provLive["models"].(map[string]interface{})
+			list = append(list, ProvInfo{ID: provID, Name: name, Models: mMap})
 		}
 	}
 
-	// 3. User configured providers from opencode.json
+	// 4. User configured custom providers from opencode.json (Ollama, LM Studio, etc.)
 	providersMap, _ := fullCfg["provider"].(map[string]interface{})
 	for id, p := range providersMap {
-		if id == "opencode" {
+		if id == "opencode" || id == "google" || id == "anthropic" || id == "openai" || id == "deepseek" {
 			continue
 		}
 		if pObj, ok := p.(map[string]interface{}); ok {
