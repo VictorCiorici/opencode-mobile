@@ -143,22 +143,6 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        // Long-press to change the bridge URL
-        web.setOnLongClickListener(v -> {
-            android.app.AlertDialog.Builder d = new android.app.AlertDialog.Builder(this);
-            final android.widget.EditText input = new android.widget.EditText(this);
-            input.setText(sp.getString(KEY_URL, DEFAULT_URL));
-            d.setTitle("OpenForge bridge URL").setView(input)
-              .setPositiveButton("Save", (dialog, which) -> {
-                  String u = input.getText().toString().trim();
-                  if (!u.isEmpty()) {
-                      sp.edit().putString(KEY_URL, u).apply();
-                      web.loadUrl(u);
-                  }
-              }).setNegativeButton("Cancel", null).show();
-            return true;
-        });
-
         waitForServerAndLoad(url);
     }
 

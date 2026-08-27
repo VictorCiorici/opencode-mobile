@@ -184,7 +184,8 @@
         <span id="auth-tag-opencode" class="server-badge" style="background:var(--muted)">not set</span>
       </div>
       <div class="card-row" style="margin-bottom:10px">
-        <input id="key-opencode" type="password" placeholder="zen_live_... (paste OpenCode token)">
+        <input id="key-opencode" type="password" placeholder="zen_live_... (paste token)">
+        <button id="btn-paste-opencode" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
         <button id="btn-save-opencode-key" class="primary" style="white-space:nowrap">Save</button>
       </div>
 
@@ -193,7 +194,8 @@
         <span id="auth-tag-gemini" class="server-badge" style="background:var(--muted)">not set</span>
       </div>
       <div class="card-row" style="margin-bottom:10px">
-        <input id="key-gemini" type="password" placeholder="AIzaSy... (Gemini API key)">
+        <input id="key-gemini" type="password" placeholder="AIzaSy... (Gemini key)">
+        <button id="btn-paste-gemini" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
         <button id="btn-save-gemini-key" class="ghost" style="white-space:nowrap">Save</button>
       </div>
 
@@ -201,13 +203,14 @@
         <label style="font-weight:600;font-size:13px">Other Provider Keys (BYOK)</label>
       </div>
       <div class="card-row" style="margin-bottom:0">
-        <select id="key-provider-select" style="max-width:105px">
+        <select id="key-provider-select" style="max-width:100px">
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
           <option value="qwen">Qwen</option>
           <option value="glm">GLM</option>
         </select>
         <input id="key-provider-val" type="password" placeholder="API Key">
+        <button id="btn-paste-custom" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
         <button id="btn-save-custom-key" class="ghost" style="white-space:nowrap">Save</button>
       </div>
     </div>

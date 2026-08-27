@@ -747,7 +747,23 @@ function initSettings() {
       }
     } catch {}
   }
-  loadAuthStatus();
+  // Clipboard paste helpers
+  async function pasteTo(selector) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        $(selector).value = text.trim();
+        toast("Pasted from clipboard ✓");
+      } else {
+        toast("Clipboard is empty", true);
+      }
+    } catch {
+      toast("Paste manually by tapping in field", true);
+    }
+  }
+  $("#btn-paste-opencode")?.addEventListener("click", () => pasteTo("#key-opencode"));
+  $("#btn-paste-gemini")?.addEventListener("click", () => pasteTo("#key-gemini"));
+  $("#btn-paste-custom")?.addEventListener("click", () => pasteTo("#key-provider-val"));
 
   $("#btn-save-opencode-key")?.addEventListener("click", async () => {
     const token = $("#key-opencode").value.trim();
