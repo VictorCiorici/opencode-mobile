@@ -249,6 +249,55 @@ async def del_model(pid: str, body: ModelDel, _: None = Depends(auth)):
     return {"ok": True, "config": cfg}
 
 
+from . import auth_cfg
+
+# ------------------------------------------------------------- auth & settings ---
+
+class TokenIn(BaseModel):
+    provider_id: str = "opencode"
+    token: str
+    base_url: str | None = None
+
+
+class TokenDel(BaseModel):
+    provider_id: str = "opencode"
+
+
+class WorkspaceIn(BaseModel):
+    path: str
+
+
+@app.get("/api/auth/status")
+async def get_auth_status(_: None = Depends(auth)):
+    return auth_cfg.get_auth_status()
+
+
+@app.post("/api/auth/token")
+async def save_token(body: TokenIn, _: None = Depends(auth)):
+    if body.provider_id == "opencode":
+        res = auth_cfg.save_opencode_token(body.token)
+    else:
+        res = auth_cfg.save_provider_key(body.provider_id, body.token, body.base_url)
+    return {"ok": True, "status": res}
+
+
+@app.delete("/api/auth/token")
+async def delete_token(body: TokenDel, _: None = Depends(auth)):
+    res = auth_cfg.remove_token(body.provider_id)
+    return {"ok": True, "status": res}
+
+
+@app.get("/api/settings/workspace")
+async def get_workspace_setting(_: None = Depends(auth)):
+    return {"workspace_dir": auth_cfg.get_workspace_dir()}
+
+
+@app.post("/api/settings/workspace")
+async def set_workspace_setting(body: WorkspaceIn, _: None = Depends(auth)):
+    p = auth_cfg.set_workspace_dir(body.path)
+    return {"ok": True, "workspace_dir": p}
+
+
 # ------------------------------------------------------------- favorites ---
 
 class FavIn(BaseModel):

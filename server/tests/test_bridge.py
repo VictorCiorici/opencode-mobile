@@ -112,3 +112,36 @@ def test_local_scanner_and_register(workspace):
     assert "qwen2.5-coder:7b" in cfg["provider"]["ollama-test"]["models"]
 
 
+def test_auth_and_workspace_settings(workspace):
+    from fastapi.testclient import TestClient
+    from ocmb.main import app
+    client = TestClient(app)
+
+    # 1. Check auth status initially
+    r = client.get("/api/auth/status")
+    assert r.status_code == 200
+    assert "opencode" in r.json()
+
+    # 2. Save an OpenCode Zen token
+    save_r = client.post("/api/auth/token", json={"provider_id": "opencode", "token": "zen_live_test12345678"})
+    assert save_r.status_code == 200
+    assert save_r.json()["status"]["opencode"]["configured"] is True
+
+    # 3. Save a Gemini API key
+    gem_r = client.post("/api/auth/token", json={"provider_id": "gemini", "token": "AIzaSyTestKey123456"})
+    assert gem_r.status_code == 200
+    assert gem_r.json()["status"]["gemini"]["configured"] is True
+
+    # 4. Check workspace settings
+    ws_r = client.get("/api/settings/workspace")
+    assert ws_r.status_code == 200
+    assert "workspace_dir" in ws_r.json()
+
+    # 5. Update workspace setting
+    new_ws = str(workspace / "custom_projects")
+    set_ws = client.post("/api/settings/workspace", json={"path": new_ws})
+    assert set_ws.status_code == 200
+    assert set_ws.json()["workspace_dir"] == new_ws
+
+
+

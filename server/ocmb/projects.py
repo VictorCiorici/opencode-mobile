@@ -45,6 +45,7 @@ def _slug(name: str) -> str:
 
 
 def create_project(name: str, git_init: bool = True, branch: str = "main") -> dict:
+    from .auth_cfg import get_workspace_dir
     slug = _slug(name)
     with _lock:
         reg = _load()
@@ -53,7 +54,8 @@ def create_project(name: str, git_init: bool = True, branch: str = "main") -> di
         while pid in ids:
             pid = f"{slug}-{i}"
             i += 1
-        path = os.path.join(str(WORKSPACE_DIR), pid)
+        ws_dir = get_workspace_dir()
+        path = os.path.join(ws_dir, pid)
         os.makedirs(path, exist_ok=True)
         if git_init and not os.path.isdir(os.path.join(path, ".git")):
             init = ["git", "init"]

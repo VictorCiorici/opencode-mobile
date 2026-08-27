@@ -177,6 +177,50 @@
 
   <!-- SETTINGS -->
   <section id="view-settings" class="view">
+    <h3 class="sect">AI Credentials & API Keys</h3>
+    <div class="card form-col" style="margin-bottom:12px">
+      <div class="card-row" style="margin-bottom:6px">
+        <label style="font-weight:600;font-size:13px">OpenCode Zen Token</label>
+        <span id="auth-tag-opencode" class="server-badge" style="background:var(--muted)">not set</span>
+      </div>
+      <div class="card-row" style="margin-bottom:10px">
+        <input id="key-opencode" type="password" placeholder="zen_live_... (paste OpenCode token)">
+        <button id="btn-save-opencode-key" class="primary" style="white-space:nowrap">Save</button>
+      </div>
+
+      <div class="card-row" style="margin-bottom:6px">
+        <label style="font-weight:600;font-size:13px">Google Gemini / Antigravity</label>
+        <span id="auth-tag-gemini" class="server-badge" style="background:var(--muted)">not set</span>
+      </div>
+      <div class="card-row" style="margin-bottom:10px">
+        <input id="key-gemini" type="password" placeholder="AIzaSy... (Gemini API key)">
+        <button id="btn-save-gemini-key" class="ghost" style="white-space:nowrap">Save</button>
+      </div>
+
+      <div class="card-row" style="margin-bottom:6px">
+        <label style="font-weight:600;font-size:13px">Other Provider Keys (BYOK)</label>
+      </div>
+      <div class="card-row" style="margin-bottom:0">
+        <select id="key-provider-select" style="max-width:105px">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="qwen">Qwen</option>
+          <option value="glm">GLM</option>
+        </select>
+        <input id="key-provider-val" type="password" placeholder="API Key">
+        <button id="btn-save-custom-key" class="ghost" style="white-space:nowrap">Save</button>
+      </div>
+    </div>
+
+    <h3 class="sect">Default Workspace Directory</h3>
+    <div class="card form-col" style="margin-bottom:12px">
+      <div class="card-row" style="margin-bottom:6px">
+        <input id="set-workspace-dir" placeholder="/sdcard/OpenForge/projects">
+        <button id="btn-save-workspace" class="ghost" style="white-space:nowrap">Save</button>
+      </div>
+      <small style="color:var(--muted)">Parent folder where new projects are created automatically with Git.</small>
+    </div>
+
     <h3 class="sect">Connection & Profiles</h3>
     <div class="card form-col">
       <div id="conn-profiles" class="branch-chips" style="margin-bottom:8px"></div>

@@ -720,6 +720,76 @@ function initSettings() {
     initSSE();
   });
 
+  // Auth Status & API Key Management
+  async function loadAuthStatus() {
+    try {
+      const st = await api("/api/auth/status");
+      const ocTag = $("#auth-tag-opencode");
+      if (ocTag) {
+        ocTag.textContent = st.opencode?.configured ? `configured (${st.opencode.preview})` : "not set";
+        ocTag.style.background = st.opencode?.configured ? "var(--ok)" : "var(--muted)";
+        ocTag.style.color = st.opencode?.configured ? "#04291a" : "#fff";
+      }
+      const gemTag = $("#auth-tag-gemini");
+      if (gemTag) {
+        gemTag.textContent = st.gemini?.configured ? `configured (${st.gemini.preview})` : "not set";
+        gemTag.style.background = st.gemini?.configured ? "var(--ok)" : "var(--muted)";
+        gemTag.style.color = st.gemini?.configured ? "#04291a" : "#fff";
+      }
+    } catch {}
+  }
+  loadAuthStatus();
+
+  $("#btn-save-opencode-key")?.addEventListener("click", async () => {
+    const token = $("#key-opencode").value.trim();
+    if (!token) return toast("Enter an OpenCode token", true);
+    try {
+      await api("/api/auth/token", { method: "POST", body: { provider_id: "opencode", token } });
+      $("#key-opencode").value = "";
+      toast("OpenCode Zen token saved ✓");
+      loadAuthStatus();
+    } catch (e) { toast(e.message, true); }
+  });
+
+  $("#btn-save-gemini-key")?.addEventListener("click", async () => {
+    const token = $("#key-gemini").value.trim();
+    if (!token) return toast("Enter a Gemini API key", true);
+    try {
+      await api("/api/auth/token", { method: "POST", body: { provider_id: "gemini", token } });
+      $("#key-gemini").value = "";
+      toast("Gemini API key saved ✓");
+      loadAuthStatus();
+    } catch (e) { toast(e.message, true); }
+  });
+
+  $("#btn-save-custom-key")?.addEventListener("click", async () => {
+    const provider_id = $("#key-provider-select").value;
+    const token = $("#key-provider-val").value.trim();
+    if (!token) return toast("Enter an API key", true);
+    try {
+      await api("/api/auth/token", { method: "POST", body: { provider_id, token } });
+      $("#key-provider-val").value = "";
+      toast(`${provider_id.toUpperCase()} API key saved ✓`);
+      loadAuthStatus();
+    } catch (e) { toast(e.message, true); }
+  });
+
+  // Default Workspace Directory Management
+  api("/api/settings/workspace").then((w) => {
+    if ($("#set-workspace-dir") && w.workspace_dir) {
+      $("#set-workspace-dir").value = w.workspace_dir;
+    }
+  }).catch(() => {});
+
+  $("#btn-save-workspace")?.addEventListener("click", async () => {
+    const path = $("#set-workspace-dir").value.trim();
+    if (!path) return toast("Enter a directory path", true);
+    try {
+      const res = await api("/api/settings/workspace", { method: "POST", body: { path } });
+      toast(`Workspace updated: ${res.workspace_dir}`);
+    } catch (e) { toast(e.message, true); }
+  });
+
   const map = [
     ["#set-reasoning", "of.set.reasoning"],
     ["#set-meta", "of.set.meta"],
@@ -746,7 +816,7 @@ function initSettings() {
   });
   api("/api/health").then((h) => {
     $("#about-box").innerHTML =
-      `OpenForge v0.2 · bridge <b>${h.bridge}</b><br>` +
+      `OpenForge v0.3 · bridge <b>${h.bridge}</b><br>` +
       `opencode ${esc(h.opencode?.version || "?")} — ` +
       `${h.opencode?.healthy ? "healthy ✓" : "<span style='color:var(--err)'>offline</span>"}`;
   }).catch(() => { $("#about-box").textContent = "Bridge unreachable"; });
