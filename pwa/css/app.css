@@ -214,21 +214,29 @@ body.hide-meta .msg-meta { display: none; }
 }
 #toast.err { border-color: var(--err); color: var(--err); }
 
-/* ---------- folder browser ---------- */
-.import-btn { margin-bottom: 12px; }
-#browser-overlay {
-  position: fixed; inset: 0; background: rgba(4,6,10,.6); z-index: 50;
-  display: flex; align-items: flex-end; backdrop-filter: blur(2px);
+/* ---------- modal overlays & bottom sheets ---------- */
+.sheet-overlay,
+#browser-overlay,
+#session-overlay,
+#action-overlay,
+#term-overlay {
+  position: fixed; inset: 0; background: rgba(4,6,10,.7); z-index: 100;
+  display: flex; align-items: flex-end; backdrop-filter: blur(4px);
 }
-#browser-sheet {
-  width: 100%; max-height: 82vh; display: flex; flex-direction: column;
+.bottom-sheet,
+#browser-sheet,
+#term-sheet {
+  width: 100%; max-height: 85vh; min-height: 35vh; display: flex; flex-direction: column;
   background: var(--bg); border-top-left-radius: 22px; border-top-right-radius: 22px;
   border-top: 1px solid var(--border);
-  padding: calc(env(safe-area-inset-bottom) + 14px) 16px 14px;
-  animation: slideup .18s ease-out;
+  padding: 16px 16px calc(env(safe-area-inset-bottom) + 20px);
+  animation: slideup .18s ease-out; box-shadow: 0 -10px 40px rgba(0,0,0,.6);
 }
 @keyframes slideup { from { transform: translateY(40%); opacity: .5; } }
-#browser-list { min-height: 30vh; }
+#browser-list, #session-list, #action-buttons {
+  min-height: 120px; max-height: 55vh; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; flex: 1; margin-bottom: 8px;
+}
 
 /* ---------- git v2 ---------- */
 .remotes { color: var(--muted); font-size: 12px; padding: 0 4px 8px;
@@ -310,14 +318,4 @@ button.danger { border-color: var(--err); color: var(--err); }
 
 /* ---------- terminal drawer ---------- */
 .term-btn { font-size: 15px; padding: 5px 8px; }
-#term-overlay {
-  position: fixed; inset: 0; background: rgba(4,6,10,.6); z-index: 55;
-  display: flex; align-items: flex-end; backdrop-filter: blur(2px);
-}
-#term-sheet {
-  width: 100%; max-height: 80vh; display: flex; flex-direction: column;
-  background: var(--bg); border-top-left-radius: 20px; border-top-right-radius: 20px;
-  border-top: 1px solid var(--border); padding: calc(env(safe-area-inset-bottom) + 12px) 14px 12px;
-  animation: slideup .18s ease-out;
-}
 #term-output { flex: 1; min-height: 140px; margin-bottom: 8px; }

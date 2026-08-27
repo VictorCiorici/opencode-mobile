@@ -182,7 +182,7 @@
 <div id="toast" class="hidden"></div>
 
 <!-- terminal drawer overlay -->
-<div id="term-overlay" class="hidden">
+<div id="term-overlay" class="hidden" onclick="if(event.target===this)this.classList.add('hidden')">
   <div id="term-sheet">
     <div class="card-row" style="margin-bottom:6px">
       <strong>📟 Project Terminal</strong>
@@ -198,7 +198,7 @@
 </div>
 
 <!-- folder browser overlay -->
-<div id="browser-overlay" class="hidden">
+<div id="browser-overlay" class="hidden" onclick="if(event.target===this)this.classList.add('hidden')">
   <div id="browser-sheet">
     <div class="card-row"><strong>Pick a project folder</strong><button id="browser-close" class="ghost">✕</button></div>
     <div class="crumbs card"><button id="browser-up" class="ghost">↑ Up</button><span id="browser-path">/</span></div>
@@ -208,7 +208,7 @@
 </div>
 
 <!-- session manager overlay -->
-<div id="session-overlay" class="hidden">
+<div id="session-overlay" class="hidden" onclick="if(event.target===this)this.classList.add('hidden')">
   <div id="browser-sheet">
     <div class="card-row"><strong>Sessions</strong><button id="session-close" class="ghost">✕</button></div>
     <div class="git-btns" style="margin-bottom:8px">
