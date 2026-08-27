@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
         // Secure origin for the bundled UI: intercept appassets.androidplatform.net
         // and map /assets/* onto the APK assets/web/ folder (populated by CI).
         final WebViewAssetLoader.AssetsPathHandler assetHandler =
-                new WebViewAssetLoader.AssetsPathHandler(getAssets());
+                new WebViewAssetLoader.AssetsPathHandler(this);
         final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", path -> assetHandler.handle("web/" + path))
                 .build();
