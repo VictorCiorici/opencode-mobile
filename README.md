@@ -5,131 +5,84 @@
   <i>Turn your Android phone into an autonomous development environment with OpenCode, Git, local LLMs, and real-time streaming.</i>
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Version-0.2.0-blue.svg" alt="Version 0.2.0">
-  <img src="https://img.shields.io/badge/Platform-Android_&_PWA-green.svg" alt="Platform">
-  <img src="https://img.shields.io/badge/License-MIT-purple.svg" alt="License MIT">
-  <img src="https://img.shields.io/badge/Build-GitHub_Actions_CI-orange.svg" alt="CI">
-</p>
-
 ---
 
 ## 🌟 Overview
 
-**OpenForge** is a full-featured mobile IDE and AI agent controller designed specifically for Android. It connects directly with the **OpenCode** agent loop and local AI engines, giving you full conversational coding, project workspace management, multi-tab file editing, interactive bash permission reviews, and advanced Git operations from a clean, mobile-optimized dark UI.
+**OpenForge** is a full-featured mobile IDE and AI agent controller for Android. It connects directly with the **OpenCode** agent loop and local AI engines, giving you conversational coding, project workspace management, multi-tab file editing, a built-in project terminal, and advanced Git operations from a mobile-optimized dark UI.
 
 ```
-┌──────────────────────────────── Android Device ────────────────────────────────┐
-│                                                                                │
-│   OpenForge Native Android APK / PWA (Hardware-Accelerated Dark UI #0B0E14)    │
-│        │                                                                       │
-│        ├── 💬 Real-Time Streaming Agent Chat (Token telemetry, Reasoning)     │
-│        ├── 📁 Project & Dynamic Workspace Manager                              │
-│        ├── ⑂ Full Git Suite (Diffs, Commits, Remotes, Merge Conflicts)         │
-│        ├── 🧠 Local AI & LAN Subnet Scanner (Ollama, llama.cpp, LM Studio)     │
-│        ├── 📟 Built-in Project Terminal Drawer                                 │
-│        └── 🔑 AI Credentials & API Keys Manager (OpenCode Zen, BYOK)           │
-│                                                                                │
-│   Android Foreground Service (DaemonService :8787)                             │
-│        │                                                                       │
-│        ▼                                                                       │
-│   OpenCode AI Engine & Project Instances (Lazy-spawned on ports 4100+)         │
-└────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────── Android device (APK) ───────────────────────────┐
+│  OpenForge WebView UI (secure asset-served shell, #0B0E14)                 │
+│      │  bearer-token auth (auto-generated per install)                     │
+│      ▼                                                                     │
+│  OpenForge Native Go Daemon (:8787, foreground service)                    │
+│      ├── projects registry, folder browser, file editor API                │
+│      ├── full Git suite (status/diff/stage/commit/log/graph/stash/…)       │
+│      ├── project terminal (sh exec), LAN AI-server scanner                 │
+│      └── spawns `opencode serve` per project on demand (ports 4100+)       │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────── Termux / proot Debian / desktop browser (PWA) ─────────────────┐
+│  run.sh → Python bridge (server/, FastAPI) serves the same UI + API        │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+Both backends (Go daemon and Python bridge) implement the **same HTTP API contract**, so the PWA works unchanged against either.
 
 ## ✨ Key Features
-
-### 🤖 1. Autonomous AI Coding Agent & Live Streaming
-* **Real-time SSE Token Streaming:** Watch the agent reason and generate code live.
-* **Interactive Tool Approvals:** Instant permission prompt cards (*Allow / Always for session / Deny*) for bash commands and file writes with syntax-highlighted diffs.
-* **Checkpoint Reverts & Redo:** Undo turns or restore rolled-back turns instantly with the **↪ Redo** button.
-* **Session Management:** Fork sessions, switch branches, export/share transcripts, and inspect token usage & cost telemetry.
-
-### 📡 2. Local AI Models & Wi-Fi LAN Auto-Scanner
-* **1-Tap Network Discovery:** Automatically probes localhost and active Wi-Fi subnets for running AI servers:
-  * **Ollama** (`:11434`)
-  * **LM Studio** (`:1234`)
-  * **llama.cpp** (`:8080`)
-  * **vLLM / LocalAI** (`:8000` / `:5000`)
-* **Direct IP Probing:** Connect to desktop/server AI instances over Wi-Fi, Tailscale, or WireGuard.
-* **1-Tap Import:** Imports all discovered local models directly into OpenForge configuration.
-
-### 🔑 3. Flexible AI Provider Credentials (BYOK & OpenCode Zen)
-* Configure credentials in **Settings ⚙️** with zero terminal editing:
-  * **OpenCode Zen API Token**
-  * **Google Gemini / Antigravity API Key**
-  * **OpenAI / Anthropic / Qwen (DashScope) / GLM (Zhipu AI)**
-* Masked secure preview (`zen_...456`, `AIza...`) so secret keys are never exposed in plaintext.
-
-### ⑂ 4. Complete Mobile Git Suite
-* **Staging & Commits:** Per-file and bulk staging/unstaging, commit creation, and commit history graph.
-* **Diff Viewer:** Live side-by-side and unified diffs with syntax highlighting.
-* **Remote Manager:** Add, edit, or remove Git `origin` remotes with custom SSH/HTTPS URLs.
-* **1-Tap Merge Conflict Resolver:** Interactive 3-way conflict cards (*Accept Ours / Accept Theirs / Custom Edit*).
-* **Stash Roundtrip:** Create, inspect, pop, and drop stashes.
-
-### 📱 5. Built for Touch & Mobile Ergonomics
-* **Full-Height Bottom Drawers:** Touch-scrollable cards with safe-area padding so no items are hidden behind Android navigation bars.
-* **Terminal Drawer:** Built-in mini-terminal drawer to run shell commands in the active project directory.
-* **Offline Asset Fallback:** Bundled local assets ensure the UI shell opens instantly without browser error screens.
-* **Deterministic App Signing:** Updates install seamlessly in-place without signature conflicts.
-
----
+* **Real-time streaming chat** with tool-approval cards, checkpoint revert/redo, session fork/share.
+* **Project management**: create, import any folder, clone from GitHub/Git URLs.
+* **Complete Git suite**: staging, commits, per-file diffs, commit graph, branches, remotes, stashes, merge-conflict resolver.
+* **Built-in terminal drawer** running commands in the active project directory.
+* **Local AI discovery**: scans localhost/LAN for Ollama (`:11434`), LM Studio (`:1234`), llama.cpp (`:8080`), vLLM/LocalAI; one-tap import into the OpenCode config.
+* **Credentials manager**: OpenCode Zen, Gemini, OpenAI, Anthropic, Qwen, GLM keys + GitHub PAT (used for private clones); everything stored with restrictive permissions, never echoed back in API responses.
 
 ## 🚀 Installation & Quick Start
 
-### Option A: Install Android APK (Recommended)
-1. Download the latest release APK from [GitHub Actions Releases](https://github.com/VictorCiorici/opencode-mobile/actions).
-2. Install the APK on your Android device (Android 7.0+ supported).
-3. Open **OpenForge** and start coding!
+### Option A — Android APK (recommended)
+1. Download the latest APK from [GitHub Actions artifacts](https://github.com/VictorCiorici/opencode-mobile/actions).
+2. Install it (Android 7.0+). Updates install in place — the debug keystore is committed so signatures stay stable.
+3. On first launch grant notifications and storage access when prompted.
+4. For the full AI experience install the `opencode` binary on-device (e.g. via Termux at `/data/data/com.termux/files/usr/bin/opencode`). Without it you can still manage projects, files, git and the terminal; the daemon reports `opencode offline` honestly instead of faking responses.
 
-### Option B: Run via Browser / Termux PWA
-Inside your Linux / Termux PRoot environment:
-
+### Option B — Browser / Termux / proot (PWA)
 ```bash
-# Clone the repository
 git clone https://github.com/VictorCiorici/opencode-mobile.git
 cd opencode-mobile
-
-# Start the bridge server
-python3 -m uvicorn ocmb.main:app --app-dir server --host 127.0.0.1 --port 8787
+./run.sh            # installs deps if needed and starts the bridge
 ```
+Open Chrome at `http://127.0.0.1:8787/ui`, then *Add to Home Screen* to install as a full-screen PWA.
 
-Open Chrome on your phone and navigate to:
-```
-http://127.0.0.1:8787/ui
-```
-Tap **Chrome Menu ➔ Add to Home Screen** to install as a full-screen PWA.
+## 🔐 Security model
+* The Android daemon generates a random bearer token per install and hands it to its own WebView through a JS interface; every API call (headers or `?token=` for SSE) must present it. Browsers cannot talk to the daemon without it.
+* Termux/desktop flow: set `OCMB_TOKEN` to require a token there too (otherwise auth is disabled, which is fine while bound to loopback only).
+* File APIs are strictly contained inside each project root (traversal- and symlink-proof).
+* Secrets (auth.json, opencode config with API keys, `.git-credentials`) are written with `0600`; GitHub PAT edits merge into `.git-credentials` instead of clobbering other hosts.
+* Android allows cleartext HTTP **only** to loopback — remote bridges must use HTTPS/Tailscale/WireGuard.
 
----
-
-## ⚙️ Configuration Environment Variables
+## ⚙️ Configuration
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
-| `OCMB_PORT` | `8787` | Bridge listening port |
-| `OCMB_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for LAN access) |
-| `OCMB_WORKSPACE` | `~/opencode-projects` | Default parent folder for new projects |
-| `OCMB_OPENCODE_BIN` | `opencode` | Path to the OpenCode binary |
-| `OCMB_TOKEN` | *unset* | Optional Bearer token for API authentication |
+| `OCMB_PORT` / `-port` | `8787` | Bridge listening port |
+| `OCMB_HOST` / `-host` | `127.0.0.1` | Bind address |
+| `OCMB_WORKSPACE` / `-workspace` | `~/opencode-projects` (`/sdcard/OpenForge/projects` on device) | Parent folder for new projects |
+| `OCMB_DATA` / `-data` | `~/.local/share/opencode-mobile` | Registry/sessions/cache storage |
+| `OCMB_OPENCODE_BIN` | `opencode` | Path to the OpenCode binary (Python bridge) |
+| `OCMB_TOKEN` / `-token` | *unset* | Require bearer token for API authentication |
 
----
-
-## 🧪 Automated Testing
-
-OpenForge includes a complete pytest test suite covering models, favorites, Git operations, remotes, local LAN scanning, and authentication:
-
+## 🧪 Testing
 ```bash
-cd server
-python3 -m pytest tests/ -v
+# Go daemon
+cd daemon && go test ./...
+
+# Python bridge
+pip install -r server/requirements.txt pytest
+cd server && python -m pytest tests/ -v
 ```
-
-All 10 automated test suites verify bridge resilience, non-git project fallbacks, and local model registration.
-
----
+CI builds the ARM64 daemon, runs both test suites, and uploads the APK on every push.
 
 ## 📜 License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).

@@ -6,3 +6,8 @@ nohup.out
 *.log
 .DS_Store
 apk/
+.pytest_cache/
+
+# Native daemon binaries are built by CI (.github/workflows/build-apk.yml)
+android/app/src/main/jniLibs/arm64-v8a/libdaemon.so
+android/app/src/main/assets/bin/openforge-daemon
