@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -36,6 +38,80 @@ func setTestGitIdentity(t *testing.T) {
 	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "test")
 	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+}
+
+func TestNormalizeEngineProviders(t *testing.T) {
+	// Engine shape: models as an ARRAY of objects (this previously broke the
+	// UI into "0","1",... ids) — plus a map-shaped provider for robustness.
+	body := map[string]interface{}{
+		"default": "opencode/grok-code",
+		"providers": []interface{}{
+			map[string]interface{}{
+				"id":   "opencode",
+				"name": "OpenCode Zen",
+				"models": []interface{}{
+					map[string]interface{}{"id": "grok-code", "name": "Grok Code"},
+					map[string]interface{}{"id": "claude-sonnet-4-5"},
+				},
+			},
+			map[string]interface{}{
+				"id":     "custom",
+				"name":   "Custom",
+				"models": map[string]interface{}{"m1": map[string]interface{}{"name": "Model One"}},
+			},
+		},
+	}
+	provs := normalizeEngineProviders(body)
+	if len(provs) != 2 {
+		t.Fatalf("want 2 providers, got %d", len(provs))
+	}
+	zen := provs[0]
+	if zen.ID != "opencode" || zen.Name != "OpenCode Zen" || zen.Source != "engine" {
+		t.Fatalf("bad provider header: %+v", zen)
+	}
+	if m, ok := zen.Models["grok-code"].(map[string]interface{}); !ok || m["name"] != "Grok Code" {
+		t.Fatalf("zen models wrong: %v", zen.Models)
+	}
+	if m, _ := zen.Models["claude-sonnet-4-5"].(map[string]interface{}); m == nil || m["name"] != "claude-sonnet-4-5" {
+		t.Fatalf("missing-name model not defaulted: %v", zen.Models)
+	}
+	if m, _ := provs[1].Models["m1"].(map[string]interface{}); m == nil || m["name"] != "Model One" {
+		t.Fatalf("map-shaped models not normalized: %v", provs[1].Models)
+	}
+}
+
+func TestFetchEngineProvidersViaFakeServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/config/providers" {
+			w.Write([]byte(`{"providers":[{"id":"opencode","name":"OpenCode Zen","models":[{"id":"grok-code","name":"Grok Code"}]}]}`))
+			return
+		}
+		if r.URL.Path == "/global/health" {
+			w.WriteHeader(200)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+	port := srvPort(t, srv)
+	inst := &Instance{PID: "fake", Port: port}
+	provs, ok := fetchEngineProviders(inst)
+	if !ok || len(provs) != 1 || provs[0].ID != "opencode" {
+		t.Fatalf("engine fetch failed: ok=%v provs=%v", ok, provs)
+	}
+	if _, has := provs[0].Models["grok-code"]; !has {
+		t.Fatalf("grok-code missing: %v", provs[0].Models)
+	}
+}
+
+func srvPort(t *testing.T, srv *httptest.Server) int {
+	t.Helper()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := strconv.Atoi(u.Port())
+	return p
 }
 
 func TestSafeJoinRejectsTraversal(t *testing.T) {

@@ -353,6 +353,51 @@ func findOpenCodeBinary() string {
 
 var ErrNoEngine = fmt.Errorf("opencode engine not found")
 
+// spawnLocked starts `opencode serve` for pid rooted at dir. Callers must
+// hold m.mu and unlock it themselves after registering the instance.
+func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
+	opencodeBin := findOpenCodeBinary()
+	if opencodeBin == "" {
+		return nil, ErrNoEngine
+	}
+	port := m.nextPort
+	m.nextPort++
+	cmd := exec.Command(opencodeBin, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
+	cmd.Dir = dir
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start opencode for '%s': %w", pid, err)
+	}
+	inst := &Instance{
+		PID:      pid,
+		Path:     dir,
+		Port:     port,
+		Cmd:      cmd,
+		LastUsed: time.Now(),
+	}
+	m.instances[pid] = inst
+	go func() { cmd.Wait() }()
+	return inst, nil
+}
+
+// waitHealthy blocks until the instance port responds (or timeout) and
+// deregisters the instance if it never came up.
+func (m *Manager) waitHealthy(inst *Instance) *Instance {
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if isPortHealthy(inst.Port) {
+			return inst
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	m.mu.Lock()
+	delete(m.instances, inst.PID)
+	m.mu.Unlock()
+	inst.Cmd.Process.Kill()
+	return inst
+}
+
 func (m *Manager) Get(pid string) (*Instance, error) {
 	m.mu.Lock()
 
@@ -364,56 +409,38 @@ func (m *Manager) Get(pid string) (*Instance, error) {
 		}
 	}
 
-	opencodeBin := findOpenCodeBinary()
-	if opencodeBin == "" {
-		m.mu.Unlock()
-		return nil, ErrNoEngine
-	}
-
 	proj := findProject(pid)
 	if proj == nil {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("project '%s' not found", pid)
 	}
 
-	port := m.nextPort
-	m.nextPort++
-
-	cmd := exec.Command(opencodeBin, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
-	cmd.Dir = proj.Path
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
-	if err := cmd.Start(); err != nil {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("failed to start opencode for '%s': %w", pid, err)
-	}
-
-	inst := &Instance{
-		PID:      pid,
-		Path:     proj.Path,
-		Port:     port,
-		Cmd:      cmd,
-		LastUsed: time.Now(),
-	}
-	m.instances[pid] = inst
-	go func() { cmd.Wait() }()
+	inst, err := m.spawnLocked(pid, proj.Path)
 	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return m.waitHealthy(inst), nil
+}
 
-	deadline := time.Now().Add(12 * time.Second)
-	for time.Now().Before(deadline) {
-		if isPortHealthy(port) {
+// GetShared returns a project-independent opencode instance (spawned in the
+// workspace root) used for global queries like the provider/model catalog.
+// This is the ground truth for what the *connected* opencode actually offers.
+func (m *Manager) GetShared() (*Instance, error) {
+	m.mu.Lock()
+	if inst, ok := m.instances["__shared__"]; ok {
+		if inst.Cmd != nil && inst.Cmd.Process != nil && isPortHealthy(inst.Port) {
+			inst.LastUsed = time.Now()
+			m.mu.Unlock()
 			return inst, nil
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
-
-	// Engine never became healthy; drop it so the next attempt retries cleanly.
-	m.mu.Lock()
-	delete(m.instances, pid)
+	inst, err := m.spawnLocked("__shared__", getWorkspaceDir())
 	m.mu.Unlock()
-	cmd.Process.Kill()
-	return inst, nil
+	if err != nil {
+		return nil, err
+	}
+	return m.waitHealthy(inst), nil
 }
 
 func (m *Manager) Stop(pid string) bool {
@@ -1960,6 +1987,97 @@ func fetchLiveOpenCodeModels() map[string]interface{} {
 	return getFallbackOpenCodeModels()
 }
 
+// ProvInfo is the PWA-facing provider entry. Models is always a map keyed by
+// model id (the engine returns arrays, models.dev returns maps — normalize).
+type ProvInfo struct {
+	ID     string                 `json:"id"`
+	Name   string                 `json:"name"`
+	Models map[string]interface{} `json:"models"`
+	Source string                 `json:"source,omitempty"` // engine | catalog | config | fallback
+}
+
+// normalizeEngineProviders converts opencode's GET /config/providers payload
+// into the ProvInfo shape. Engine providers are the ground truth for what is
+// actually available on the connected opencode.
+func normalizeEngineProviders(body map[string]interface{}) []ProvInfo {
+	raw, _ := body["providers"].([]interface{})
+	out := []ProvInfo{}
+	for _, item := range raw {
+		p, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := p["id"].(string)
+		name, _ := p["name"].(string)
+		if id == "" {
+			id = name
+		}
+		if id == "" {
+			continue
+		}
+		if name == "" {
+			name = id
+		}
+		models := map[string]interface{}{}
+		switch m := p["models"].(type) {
+		case []interface{}:
+			for _, mi := range m {
+				mo, ok := mi.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				mid, _ := mo["id"].(string)
+				if mid == "" {
+					continue
+				}
+				mname, _ := mo["name"].(string)
+				if mname == "" {
+					mname = mid
+				}
+				models[mid] = map[string]interface{}{"name": mname}
+			}
+		case map[string]interface{}:
+			for mid, mv := range m {
+				mname := mid
+				if mo, ok := mv.(map[string]interface{}); ok {
+					if s, ok := mo["name"].(string); ok && s != "" {
+						mname = s
+					}
+				}
+				models[mid] = map[string]interface{}{"name": mname}
+			}
+		}
+		out = append(out, ProvInfo{ID: id, Name: name, Models: models, Source: "engine"})
+	}
+	return out
+}
+
+// fetchEngineProviders queries a running instance's provider catalog.
+func fetchEngineProviders(inst *Instance) ([]ProvInfo, bool) {
+	if inst == nil || !isPortHealthy(inst.Port) {
+		return nil, false
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/config/providers", inst.Port))
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil, false
+	}
+	var body map[string]interface{}
+	err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, false
+	}
+	provs := normalizeEngineProviders(body)
+	if len(provs) == 0 {
+		return nil, false
+	}
+	return provs, true
+}
+
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		handleModelsWrite(w, r)
@@ -1971,29 +2089,72 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	pid := strings.TrimPrefix(r.URL.Path, "/api/models/")
 	pid = strings.TrimSpace(pid)
+	isGlobal := pid == "" || pid == "global" || pid == "default"
 
-	if pid != "" && pid != "global" && pid != "default" {
-		inst, err := instMgr.Get(pid)
-		if err == nil && inst != nil {
-			target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
-			proxy := httputil.NewSingleHostReverseProxy(target)
-			r.URL.Path = "/config/providers"
-			proxy.ServeHTTP(w, r)
-			return
+	// 1. The connected opencode engine is the source of truth: for a project
+	//    use its own instance, otherwise a shared workspace-rooted instance.
+	var inst *Instance
+	if isGlobal {
+		inst, _ = instMgr.GetShared()
+	} else {
+		inst, _ = instMgr.Get(pid)
+	}
+	if provs, ok := fetchEngineProviders(inst); ok {
+		have := map[string]bool{}
+		for _, p := range provs {
+			have[p.ID] = true
+		}
+		// Fill gaps with the public catalog (e.g. providers the engine
+		// has no credentials for yet) so browsing still works.
+		for _, p := range catalogProviders() {
+			if !have[p.ID] {
+				provs = append(provs, p)
+			}
+		}
+		writeJSON(w, http.StatusOK, blob{"providers": provs, "source": "engine"})
+		return
+	}
+
+	// 2. No engine reachable: live models.dev catalog + local config + fallback.
+	list := catalogProviders()
+	have := map[string]bool{}
+	for _, p := range list {
+		have[p.ID] = true
+	}
+	fullCfg := readOpencodeConfig()
+	providersMap, _ := fullCfg["provider"].(map[string]interface{})
+	for id, p := range providersMap {
+		if have[id] {
+			continue
+		}
+		if pObj, ok := p.(map[string]interface{}); ok {
+			name, _ := pObj["name"].(string)
+			if name == "" {
+				name = id
+			}
+			mMap, _ := pObj["models"].(map[string]interface{})
+			if mMap == nil {
+				mMap = map[string]interface{}{}
+			}
+			list = append(list, ProvInfo{ID: id, Name: name, Models: mMap, Source: "config"})
 		}
 	}
 
-	fullCfg := readOpencodeConfig()
+	writeJSON(w, http.StatusOK, blob{"providers": list, "source": "catalog"})
+}
 
-	type ProvInfo struct {
-		ID     string                 `json:"id"`
-		Name   string                 `json:"name"`
-		Models map[string]interface{} `json:"models"`
-	}
-	var list []ProvInfo
-
+// catalogProviders builds the no-engine provider list: live models.dev data
+// first (provider "opencode" IS the OpenCode Zen catalog), then the offline
+// fallback registry if nothing was fetched.
+func catalogProviders() []ProvInfo {
 	allLiveProviders := fetchLiveOpenCodeModels()
+	_, live := allLiveProviders["opencode"]
+	source := "catalog"
+	if !live {
+		source = "fallback"
+	}
 
+	var list = []ProvInfo{}
 	appendProv := func(id string, data map[string]interface{}, fallback string) {
 		name, _ := data["name"].(string)
 		if name == "" {
@@ -2003,7 +2164,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		if mMap == nil {
 			mMap = map[string]interface{}{}
 		}
-		list = append(list, ProvInfo{ID: id, Name: name, Models: mMap})
+		list = append(list, ProvInfo{ID: id, Name: name, Models: mMap, Source: source})
 	}
 
 	for _, id := range []string{"opencode", "google", "anthropic", "openai", "deepseek"} {
@@ -2015,18 +2176,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			appendProv(id, provLive, names[id])
 		}
 	}
-
-	providersMap, _ := fullCfg["provider"].(map[string]interface{})
-	for id, p := range providersMap {
-		if pObj, ok := p.(map[string]interface{}); ok {
-			appendProv(id, pObj, id)
-		}
-	}
-
-	if list == nil {
-		list = []ProvInfo{}
-	}
-	writeJSON(w, http.StatusOK, blob{"providers": list})
+	return list
 }
 
 // model delete/add parity with the Python bridge -----------------------------

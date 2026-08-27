@@ -1759,7 +1759,7 @@ async function loadModels() {
     M.all = [];
     for (const p of d.providers || [])
       for (const mid of Object.keys(p.models || {}))
-        M.all.push({ p: p.id, m: mid, name: p.models[mid]?.name || mid });
+        M.all.push({ p: p.id, m: mid, name: p.models[mid]?.name || mid, src: p.source || "" });
     renderModels();
   } catch (e) { ul.innerHTML = ""; toast(e.message, true); }
 }
@@ -1784,8 +1784,10 @@ function renderModels() {
     const isFav = favKeys.has(key);
     const isDef = S.model && S.model.providerID === x.p && S.model.modelID === x.m;
     const li = document.createElement("li");
+    const liveTag = x.src === "engine"
+      ? ' <span style="color:var(--ok);font-size:10px">● live</span>' : "";
     li.innerHTML = `<div class="model-item"><strong>${esc(x.name)}${isFav ? '<span class="fav-tag">★</span>' : ""}</strong>
-        <small>${esc(x.p)}</small></div>
+        <small>${esc(x.p)}${liveTag}</small></div>
       <div class="git-btns">
         ${isDef ? '<span class="badge-default">active</span>' : ""}
         <button class="fav-star ${isFav ? "on" : ""}" title="favorite">${isFav ? "★" : "☆"}</button>

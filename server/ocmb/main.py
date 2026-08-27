@@ -272,14 +272,96 @@ async def register_local(body: RegisterLocalIn, _: None = Depends(auth)):
     return {"ok": True, "config": cfg}
 
 
+def _normalize_providers(data: Any) -> list[dict]:
+    """Normalize engine/catalog provider payloads to the PWA shape:
+    providers:[{id, name, models: {model_id: {name}}}].
+    The engine returns models as a list of objects; the catalog as a map."""
+    provs = data.get("providers") if isinstance(data, dict) else data
+    out = []
+    for p in provs or []:
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("id") or p.get("name") or ""
+        if not pid:
+            continue
+        models_in = p.get("models")
+        models: dict = {}
+        if isinstance(models_in, list):
+            for m in models_in:
+                if isinstance(m, dict) and m.get("id"):
+                    models[m["id"]] = {"name": m.get("name") or m["id"]}
+        elif isinstance(models_in, dict):
+            for mid, mv in models_in.items():
+                name = mv.get("name") if isinstance(mv, dict) else None
+                models[mid] = {"name": name or mid}
+        out.append({
+            "id": pid,
+            "name": p.get("name") or pid,
+            "models": models,
+            "source": p.get("source") or "engine",
+        })
+    return out
+
+
+_FALLBACK_MODELS = {
+    "opencode": {
+        "id": "opencode",
+        "name": "OpenCode Zen",
+        "models": {
+            "claude-3-7-sonnet": {"name": "Claude 3.7 Sonnet (Thinking)"},
+            "claude-3-5-sonnet": {"name": "Claude 3.5 Sonnet"},
+            "gemini-2.5-pro": {"name": "Gemini 2.5 Pro"},
+            "gemini-2.5-flash": {"name": "Gemini 2.5 Flash"},
+            "gpt-4o": {"name": "GPT-4o"},
+            "deepseek-r1": {"name": "DeepSeek R1 (Reasoning)"},
+            "qwen-2.5-coder": {"name": "Qwen 2.5 Coder"},
+        },
+    },
+}
+
+
+async def _live_catalog() -> dict:
+    """Fetch models.dev (the live Zen catalog lives under provider 'opencode');
+    fall back to a small offline registry when unreachable."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            r = await c.get("https://models.dev/api.json")
+            if r.status_code == 200:
+                return r.json()
+    except Exception:
+        pass
+    return _FALLBACK_MODELS
+
+
+@app.get("/api/models/global")
+@app.get("/api/models/default")
+async def list_global_models(_: None = Depends(auth)):
+    """No project open: browse the live model catalog (Zen et al.)."""
+    live = await _live_catalog()
+    providers = []
+    for pid in ("opencode", "google", "anthropic", "openai", "deepseek"):
+        entry = live.get(pid)
+        if isinstance(entry, dict):
+            providers.append({
+                "id": pid,
+                "name": entry.get("name") or pid,
+                "models": entry.get("models") or {},
+                "source": "catalog",
+            })
+    return {"providers": providers, "source": "catalog"}
+
+
 @app.get("/api/models/{pid}")
 async def list_models(pid: str, _: None = Depends(auth)):
     inst = await manager.get(pid)
     async with _client() as c:
         r = await c.get(f"{inst.url}/config/providers")
     data = r.json()
-    data["default_model"] = models_cfg.current_default()
-    return JSONResponse(data, status_code=r.status_code)
+    providers = _normalize_providers(data)
+    return JSONResponse(
+        {"providers": providers, "source": "engine", "default_model": data.get("default") if isinstance(data, dict) else None},
+        status_code=r.status_code,
+    )
 
 
 @app.post("/api/models/{pid}")
