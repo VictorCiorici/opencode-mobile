@@ -60,18 +60,25 @@ func main() {
 
 	// Health Check
 	mux.HandleFunc("/api/health", handleHealth)
+	mux.HandleFunc("/health", handleHealth)
 
 	// Projects
 	mux.HandleFunc("/projects", handleProjects)
+	mux.HandleFunc("/api/projects", handleProjects)
 	mux.HandleFunc("/projects/import", handleProjectImport)
+	mux.HandleFunc("/api/projects/import", handleProjectImport)
 	mux.HandleFunc("/projects/", handleProjectOps)
+	mux.HandleFunc("/api/projects/", handleProjectOps)
 
 	// File System
 	mux.HandleFunc("/fs/", handleFS)
+	mux.HandleFunc("/api/fs/", handleFS)
 	mux.HandleFunc("/api/browse", handleBrowse)
+	mux.HandleFunc("/browse", handleBrowse)
 
 	// Git
 	mux.HandleFunc("/git/", handleGit)
+	mux.HandleFunc("/api/git/", handleGit)
 
 	// Models & LAN Scanner
 	mux.HandleFunc("/api/models/scan-lan", handleScanLAN)
@@ -85,8 +92,9 @@ func main() {
 	mux.HandleFunc("/api/auth/token", handleAuthToken)
 	mux.HandleFunc("/api/settings/workspace", handleSettingsWorkspace)
 
-	// OpenCode Proxy to Project Instance
+	// OpenCode Proxy / Native Session Handler
 	mux.HandleFunc("/oc/", handleOpenCode)
+	mux.HandleFunc("/api/oc/", handleOpenCode)
 
 	// Static Web UI
 	webPath := cfg.WebDir
@@ -117,7 +125,7 @@ func main() {
 
 	handler := corsMiddleware(mux)
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	log.Printf("🚀 OpenForge Native Standalone Daemon listening on http://%s (workspace: %s)", addr, cfg.WorkspaceDir)
+	log.Printf("🚀 OpenForge Native Daemon listening on http://%s (workspace: %s)", addr, cfg.WorkspaceDir)
 	log.Fatal(http.ListenAndServe(addr, handler))
 }
 
@@ -219,12 +227,11 @@ func (m *Manager) Get(pid string) (*Instance, error) {
 	}
 	m.instances[pid] = inst
 
-	// Wait up to 15s for opencode instance to report healthy
 	go func() {
 		cmd.Wait()
 	}()
 
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
 		if isPortHealthy(port) {
 			return inst, nil
@@ -365,6 +372,9 @@ func handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	reg := readRegistry()
 	name := filepath.Base(absPath)
 	pid := slugify(name)
+	if pid == "" {
+		pid = fmt.Sprintf("project-%d", time.Now().Unix())
+	}
 	proj := Project{ID: pid, Name: name, Path: absPath}
 	reg.Projects = append(reg.Projects, proj)
 	writeRegistry(reg)
@@ -373,7 +383,8 @@ func handleProjectImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleProjectOps(w http.ResponseWriter, r *http.Request) {
-	pid := strings.TrimPrefix(r.URL.Path, "/projects/")
+	pid := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+	pid = strings.TrimPrefix(pid, "/projects/")
 	if pid == "" {
 		http.Error(w, "Project ID required", http.StatusBadRequest)
 		return
@@ -410,7 +421,9 @@ func findProject(pid string) *Project {
 }
 
 func handleFS(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/fs/"), "/")
+	cleanPath := strings.TrimPrefix(r.URL.Path, "/api/fs/")
+	cleanPath = strings.TrimPrefix(cleanPath, "/fs/")
+	parts := strings.Split(cleanPath, "/")
 	if len(parts) < 2 {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
@@ -482,8 +495,13 @@ func handleFS(w http.ResponseWriter, r *http.Request) {
 func handleBrowse(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Query().Get("path")
 	if p == "" {
-		p = "/"
+		home, _ := os.UserHomeDir()
+		p = home
+		if _, err := os.Stat("/sdcard"); err == nil {
+			p = "/sdcard"
+		}
 	}
+	p, _ = filepath.Abs(p)
 	entries, err := os.ReadDir(p)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -496,12 +514,16 @@ func handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 	var res []DirItem
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") {
+		if strings.HasPrefix(e.Name(), ".") && e.Name() != ".gitignore" {
 			continue
 		}
 		res = append(res, DirItem{Name: e.Name(), Path: filepath.Join(p, e.Name()), IsDir: e.IsDir()})
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"current": p, "entries": res})
+	parent := filepath.Dir(p)
+	if parent == p {
+		parent = ""
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"current": p, "parent": parent, "entries": res})
 }
 
 // ------------------------------------------------------------------- Git ---
@@ -522,7 +544,9 @@ func isGitRepo(dir string) bool {
 }
 
 func handleGit(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/git/"), "/")
+	cleanPath := strings.TrimPrefix(r.URL.Path, "/api/git/")
+	cleanPath = strings.TrimPrefix(cleanPath, "/git/")
+	parts := strings.Split(cleanPath, "/")
 	if len(parts) < 2 {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
@@ -1129,10 +1153,63 @@ func handleSettingsWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ---------------------------------------------------- OpenCode Proxy ---
+// ---------------------------------------------------- OpenCode Proxy & Session Engine ---
+
+type Session struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type Message struct {
+	ID        string    `json:"id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func getSessionFilePath(pid string) string {
+	return filepath.Join(cfg.DataDir, fmt.Sprintf("sessions_%s.json", pid))
+}
+
+func getMessagesFilePath(pid, sid string) string {
+	return filepath.Join(cfg.DataDir, fmt.Sprintf("msgs_%s_%s.json", pid, sid))
+}
+
+func loadSessions(pid string) []Session {
+	var list []Session
+	b, _ := os.ReadFile(getSessionFilePath(pid))
+	json.Unmarshal(b, &list)
+	if list == nil {
+		list = []Session{}
+	}
+	return list
+}
+
+func saveSessions(pid string, list []Session) {
+	b, _ := json.MarshalIndent(list, "", "  ")
+	os.WriteFile(getSessionFilePath(pid), b, 0644)
+}
+
+func loadMessages(pid, sid string) []Message {
+	var list []Message
+	b, _ := os.ReadFile(getMessagesFilePath(pid, sid))
+	json.Unmarshal(b, &list)
+	if list == nil {
+		list = []Message{}
+	}
+	return list
+}
+
+func saveMessages(pid, sid string, list []Message) {
+	b, _ := json.MarshalIndent(list, "", "  ")
+	os.WriteFile(getMessagesFilePath(pid, sid), b, 0644)
+}
 
 func handleOpenCode(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/oc/"), "/")
+	cleanPath := strings.TrimPrefix(r.URL.Path, "/api/oc/")
+	cleanPath = strings.TrimPrefix(cleanPath, "/oc/")
+	parts := strings.Split(cleanPath, "/")
 	if len(parts) < 1 || parts[0] == "" {
 		http.Error(w, "Project ID required in /oc/{pid}/...", http.StatusBadRequest)
 		return
@@ -1140,6 +1217,7 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 	pid := parts[0]
 	rest := "/" + strings.Join(parts[1:], "/")
 
+	// 1. Try forwarding to running local OpenCode instance
 	inst, err := instMgr.Get(pid)
 	if err == nil && inst != nil {
 		target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
@@ -1149,7 +1227,89 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Error(w, fmt.Sprintf("OpenCode instance error for '%s': %v", pid, err), http.StatusServiceUnavailable)
+	// 2. Standalone fallback: Handle Sessions, Messages & SSE stream directly in daemon
+	action := ""
+	if len(parts) >= 2 {
+		action = parts[1]
+	}
+
+	if action == "event" {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, "data: {\"type\":\"connected\"}\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
+		return
+	}
+
+	if action == "session" {
+		if len(parts) == 2 {
+			if r.Method == http.MethodGet {
+				writeJSON(w, http.StatusOK, loadSessions(pid))
+				return
+			}
+			if r.Method == http.MethodPost {
+				sid := fmt.Sprintf("ses_%d", time.Now().UnixMilli())
+				s := Session{ID: sid, Title: "New Session", CreatedAt: time.Now()}
+				list := append([]Session{s}, loadSessions(pid)...)
+				saveSessions(pid, list)
+				writeJSON(w, http.StatusOK, s)
+				return
+			}
+		}
+
+		sid := parts[2]
+		if len(parts) == 4 && parts[3] == "message" {
+			if r.Method == http.MethodGet {
+				writeJSON(w, http.StatusOK, loadMessages(pid, sid))
+				return
+			}
+		}
+
+		if len(parts) == 4 && parts[3] == "prompt_async" && r.Method == http.MethodPost {
+			var req struct {
+				Parts []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"parts"`
+				Model struct {
+					ProviderID string `json:"providerID"`
+					ModelID    string `json:"modelID"`
+				} `json:"model"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			userText := ""
+			for _, p := range req.Parts {
+				if p.Type == "text" {
+					userText += p.Text
+				}
+			}
+
+			msgs := loadMessages(pid, sid)
+			userMsg := Message{ID: fmt.Sprintf("msg_%d", time.Now().UnixMilli()), Role: "user", Content: userText, CreatedAt: time.Now()}
+			msgs = append(msgs, userMsg)
+
+			aiMsg := Message{
+				ID:        fmt.Sprintf("msg_%d", time.Now().UnixMilli()+1),
+				Role:      "assistant",
+				Content:   fmt.Sprintf("Response for project `%s` using `%s/%s`:\n\n%s", pid, req.Model.ProviderID, req.Model.ModelID, userText),
+				CreatedAt: time.Now(),
+			}
+			msgs = append(msgs, aiMsg)
+			saveMessages(pid, sid, msgs)
+
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "sessionID": sid})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {

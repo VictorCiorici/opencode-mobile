@@ -207,6 +207,74 @@ function renderProjectList() {
   }
 }
 
+/* ---------------- folder browser & project import ---------------- */
+
+let BROWSE_PATH = "/sdcard";
+
+async function openFolderBrowser(initialPath = "") {
+  $("#browser-overlay").classList.remove("hidden");
+  BROWSE_PATH = initialPath || BROWSE_PATH || "/sdcard";
+  await loadBrowseDir(BROWSE_PATH);
+}
+
+async function loadBrowseDir(path) {
+  const ul = $("#browser-list");
+  ul.innerHTML = `<li>Loading…</li>`;
+  $("#browser-path").textContent = path;
+  try {
+    const res = await api(`/api/browse?path=${encodeURIComponent(path)}`);
+    BROWSE_PATH = res.current || path;
+    $("#browser-path").textContent = BROWSE_PATH;
+    $("#browser-up").onclick = () => {
+      if (res.parent) loadBrowseDir(res.parent);
+    };
+    ul.innerHTML = "";
+    const entries = (res.entries || []).filter(e => e.is_dir);
+    if (!entries.length) {
+      ul.innerHTML = `<li style="color:var(--muted);padding:8px">No subfolders here</li>`;
+      return;
+    }
+    for (const e of entries) {
+      const li = document.createElement("li");
+      li.className = "file-entry";
+      li.style.cursor = "pointer";
+      li.innerHTML = `<div style="padding:4px 0"><strong>📁 ${esc(e.name)}</strong></div>`;
+      li.onclick = () => loadBrowseDir(e.path);
+      ul.appendChild(li);
+    }
+  } catch (err) {
+    ul.innerHTML = `<li style="color:var(--err);padding:8px">${esc(err.message)}</li>`;
+  }
+}
+
+$("#btn-import-project").addEventListener("click", () => {
+  openFolderBrowser();
+});
+
+$("#browser-close").addEventListener("click", () => {
+  $("#browser-overlay").classList.add("hidden");
+});
+
+$("#browser-select").addEventListener("click", async () => {
+  if (!BROWSE_PATH) return;
+  try {
+    const p = await api("/api/projects/import", {
+      method: "POST",
+      body: { path: BROWSE_PATH }
+    });
+    $("#browser-overlay").classList.add("hidden");
+    await loadProjects(false);
+    S.pid = p.id;
+    localStorage.setItem("of.pid", p.id);
+    $("#project-select").value = p.id;
+    renderProjectList();
+    toast(`Imported “${p.name}”`);
+    ensureSession();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
 /* ---------------- chat ---------------- */
 
 async function ensureSession() {
