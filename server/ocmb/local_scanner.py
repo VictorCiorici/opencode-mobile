@@ -144,7 +144,11 @@ async def scan_local_network(custom_subnet: str | None = None, include_lan: bool
 
 
 def register_local_provider(provider_id: str, name: str, base_url: str, models: list[dict[str, Any]], api_key: str = "") -> dict:
-    """Save a local/LAN provider into ~/.config/opencode/opencode.json."""
+    """Save a local/LAN provider into ~/.config/opencode/opencode.json.
+
+    The returned config is sanitized: API keys are masked so secrets never
+    round-trip over the HTTP response (the on-disk config keeps the real key).
+    """
     from .models_cfg import _config_paths, _read, _write
 
     path = _config_paths(None)[-1]
@@ -153,8 +157,10 @@ def register_local_provider(provider_id: str, name: str, base_url: str, models: 
     prov["npm"] = "@ai-sdk/openai-compatible"
     prov["name"] = name
     prov["options"] = {"baseURL": base_url}
+    has_secret = False
     if api_key:
         prov["options"]["apiKey"] = api_key
+        has_secret = True
 
     existing_models = prov.setdefault("models", {})
     for m in models:
@@ -167,5 +173,24 @@ def register_local_provider(provider_id: str, name: str, base_url: str, models: 
             "reasoning": is_reasoning,
         }
 
+    try:
+        os.chmod(path, 0o600 if has_secret else 0o644)
+    except OSError:
+        pass
     _write(path, cfg)
-    return cfg
+
+    def _mask(v: Any) -> Any:
+        if isinstance(v, dict):
+            out = {}
+            for k, val in v.items():
+                if k == "apiKey" and isinstance(val, str) and val and val != "local":
+                    tail = val[-4:] if len(val) > 8 else ""
+                    out[k] = f"{val[:4]}...{tail}" if tail else "****"
+                else:
+                    out[k] = _mask(val)
+            return out
+        if isinstance(v, list):
+            return [_mask(x) for x in v]
+        return v
+
+    return _mask(cfg)

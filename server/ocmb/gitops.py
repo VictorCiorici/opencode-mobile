@@ -23,10 +23,38 @@ async def _run(pid_path: str, *args: str) -> str:
 
 
 def _safe_path(root: str, rel: str) -> str:
-    full = os.path.abspath(os.path.join(root, rel))
-    if not full.startswith(os.path.abspath(root)):
-        raise GitError("path escapes project root")
-    return full
+    """Return an absolute path under root, rejecting traversal and symlink escapes."""
+    abs_root = os.path.realpath(os.path.abspath(root))
+    lexical = os.path.normpath(os.path.abspath(os.path.join(root, rel)))
+    try:
+        full = os.path.realpath(lexical)
+    except OSError:
+        full = lexical
+    for candidate in (abs_root, os.path.abspath(root)):
+        try:
+            if os.path.commonpath([candidate, full]) == candidate:
+                return full
+        except ValueError:
+            continue
+    raise GitError("path escapes project root")
+
+
+def _git_rel(root: str, rel: str) -> str:
+    """Normalized path relative to root, safe to pass to git as a pathspec."""
+    abs_root = os.path.abspath(root)
+    norm = os.path.normpath(os.path.join(abs_root, rel))
+    _safe_path(abs_root, rel)
+    out = os.path.relpath(norm, abs_root).replace(os.sep, "/")
+    if out in ("", "."):
+        raise GitError("invalid path")
+    return out
+
+
+def _safe_ref(ref: str) -> str:
+    ref = (ref or "").strip()
+    if not ref or ref.startswith("-") or any(c.isspace() for c in ref) or "^" in ref or "~" in ref or ":" in ref:
+        raise GitError(f"invalid reference name: {ref!r}")
+    return ref
 
 
 async def init_repo(path: str, branch: str = "main") -> str:
@@ -42,28 +70,21 @@ async def init_repo(path: str, branch: str = "main") -> str:
 
 
 async def status(path: str) -> dict:
+    empty = {
+        "is_git": False,
+        "branch": "",
+        "staged": [],
+        "unstaged": [],
+        "untracked": [],
+        "conflicts": [],
+        "has_conflicts": False,
+    }
     if not os.path.isdir(os.path.join(path, ".git")):
-        return {
-            "is_git": False,
-            "branch": "",
-            "staged": [],
-            "unstaged": [],
-            "untracked": [],
-            "conflicts": [],
-            "has_conflicts": false if False else False,
-        }
+        return empty
     try:
         porcelain = await _run(path, "status", "--porcelain=v1", "-b")
     except GitError:
-        return {
-            "is_git": False,
-            "branch": "",
-            "staged": [],
-            "unstaged": [],
-            "untracked": [],
-            "conflicts": [],
-            "has_conflicts": False,
-        }
+        return empty
     staged, unstaged, untracked, conflicts = [], [], [], []
     for line in porcelain.splitlines():
         if not line.strip() or line.startswith("#"):
@@ -113,22 +134,15 @@ async def diff(path: str, staged: bool = False) -> str:
 
 async def stage(path: str, files: list[str] | None) -> None:
     if files:
-        await _run(path, "add", "--", *[(_safe_path(path, f).removeprefix(os.path.abspath(path)).lstrip("/") or ".") for f in files])
+        await _run(path, "add", "--", *[(_git_rel(path, f)) for f in files])
     else:
         await _run(path, "add", "-A")
 
 
 async def unstage(path: str, files: list[str] | None) -> None:
     if files:
-        rels = [_safe_path(path, f).removeprefix(os.path.abspath(path)).lstrip("/") for f in files]
+        rels = [_git_rel(path, f) for f in files]
         await _run(path, "reset", "--", *rels)
-    else:
-        await _run(path, "reset")
-
-
-async def unstage(path: str, files: list[str] | None) -> None:
-    if files:
-        await _run(path, "reset", "--", *files)
     else:
         await _run(path, "reset")
 
@@ -154,16 +168,15 @@ async def branches(path: str) -> dict:
 
 
 async def create_branch(path: str, name: str) -> str:
-    return (await _run(path, "checkout", "-b", name)).strip() or f"created {name}"
+    return (await _run(path, "checkout", "-b", _safe_ref(name))).strip() or f"created {name}"
 
 
 async def checkout(path: str, ref: str) -> str:
-    return (await _run(path, "checkout", ref)).strip() or f"on {ref}"
+    return (await _run(path, "checkout", _safe_ref(ref))).strip() or f"on {ref}"
 
 
 async def discard(path: str, file_rel: str) -> str:
-    full = _safe_path(path, file_rel)
-    rel = full.removeprefix(os.path.abspath(path)).lstrip("/")
+    rel = _git_rel(path, file_rel)
     await _run(path, "checkout", "--", rel)
     return f"discarded changes in {rel}"
 
@@ -172,7 +185,7 @@ async def diff_file(path: str, file_rel: str, staged: bool = False) -> str:
     args = ["diff", "--no-color"]
     if staged:
         args.append("--cached")
-    rel = _safe_path(path, file_rel).removeprefix(os.path.abspath(path)).lstrip("/")
+    rel = _git_rel(path, file_rel)
     args += ["--", rel]
     try:
         return await _run(path, *args)
@@ -225,15 +238,15 @@ async def stash_drop(path: str, index: int) -> str:
 
 async def branch_delete(path: str, name: str, force: bool = False) -> str:
     flag = "-D" if force else "-d"
-    return (await _run(path, "branch", flag, name)).strip() or f"deleted {name}"
+    return (await _run(path, "branch", flag, _safe_ref(name))).strip() or f"deleted {name}"
 
 
 async def branch_rename(path: str, old: str, new: str) -> str:
-    return (await _run(path, "branch", "-m", old, new)).strip() or f"{old} → {new}"
+    return (await _run(path, "branch", "-m", _safe_ref(old), _safe_ref(new))).strip() or f"{old} → {new}"
 
 
 async def merge(path: str, ref: str) -> str:
-    return (await _run(path, "merge", "--no-edit", ref)).strip() or f"merged {ref}"
+    return (await _run(path, "merge", "--no-edit", _safe_ref(ref))).strip() or f"merged {ref}"
 
 
 async def graph(path: str, limit: int = 60) -> list[dict]:
@@ -266,11 +279,11 @@ async def graph(path: str, limit: int = 60) -> list[dict]:
 
 
 async def branch_create(path: str, name: str) -> str:
-    return (await _run(path, "branch", name)).strip() or f"created {name}"
+    return (await _run(path, "branch", _safe_ref(name))).strip() or f"created {name}"
 
 
 async def revert_commit(path: str, ref: str) -> str:
-    return (await _run(path, "revert", "--no-edit", ref)).strip() or f"reverted {ref[:8]}"
+    return (await _run(path, "revert", "--no-edit", _safe_ref(ref))).strip() or f"reverted {ref[:8]}"
 
 
 async def remotes(path: str) -> list[dict]:
@@ -303,13 +316,12 @@ async def remote_remove(path: str, name: str) -> str:
 
 
 async def fetch(path: str, remote: str = "origin") -> str:
-    out = await _run(path, "fetch", remote)
+    out = await _run(path, "fetch", _safe_ref(remote))
     return out.strip() or f"fetched from {remote}"
 
 
 async def resolve_conflict(path: str, file_rel: str, choice: str = "ours") -> str:
-    full = _safe_path(path, file_rel)
-    rel = full.removeprefix(os.path.abspath(path)).lstrip("/")
+    rel = _git_rel(path, file_rel)
     flag = "--ours" if choice == "ours" else "--theirs"
     await _run(path, "checkout", flag, "--", rel)
     await stage(path, [rel])

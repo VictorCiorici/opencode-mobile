@@ -27,6 +27,20 @@ def _read(path: Path) -> dict:
 def _write(path: Path, cfg: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2))
+    # Lock down the file if it contains credentials.
+    has_secret = False
+    for prov in (cfg.get("provider") or {}).values():
+        try:
+            key = (prov or {}).get("options", {}).get("apiKey")
+        except AttributeError:
+            continue
+        if isinstance(key, str) and key and key != "local":
+            has_secret = True
+            break
+    try:
+        os.chmod(path, 0o600 if has_secret else 0o644)
+    except OSError:
+        pass
 
 
 def add_model(provider_id: str, model_id: str, options: dict | None,
@@ -79,7 +93,11 @@ def list_favorites() -> list[str]:
     p = _favorites_path()
     if p.exists():
         try:
-            return json.loads(p.read_text())
+            data = json.loads(p.read_text())
+            if isinstance(data, dict):          # {"favorites": [...]} (Go-daemon format)
+                return [str(x) for x in data.get("favorites") or []]
+            if isinstance(data, list):          # legacy bare array
+                return [str(x) for x in data]
         except Exception:
             pass
     return []
@@ -88,13 +106,17 @@ def list_favorites() -> list[str]:
 def toggle_favorite(provider_id: str, model_id: str) -> tuple[list[str], bool]:
     key = f"{provider_id}/{model_id}"
     favs = list_favorites()
-    if key in favs:
-        favs.remove(key)
-        added = False
-    else:
+    added = key not in favs
+    if added:
         favs.insert(0, key)
-        added = True
+    else:
+        favs.remove(key)
     p = _favorites_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(favs))
+    # Store the object format shared with the Go daemon.
+    p.write_text(json.dumps({"favorites": favs}))
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
     return favs, added

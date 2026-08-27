@@ -92,6 +92,38 @@ def import_project(path: str) -> dict:
         return proj
 
 
+def clone_project(url: str, name: str | None = None, branch: str | None = None) -> dict:
+    """Clone a git repository into the workspace and register it."""
+    from .auth_cfg import get_workspace_dir
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("repository URL required")
+    base = name or os.path.basename(url.rstrip("/"))
+    if base.endswith(".git"):
+        base = base[:-4]
+    slug = _slug(base or "project")
+    with _lock:
+        reg = _load()
+        pid, i = slug, 2
+        while any(p["id"] == pid for p in reg["projects"]):
+            pid = f"{slug}-{i}"
+            i += 1
+        dest = os.path.join(get_workspace_dir(), pid)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        cmd = ["git", "clone"]
+        if branch:
+            cmd += ["--branch", branch]
+        cmd += [url, dest]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise ValueError(f"git clone failed: {(proc.stderr or proc.stdout).strip()}")
+        proj = {"id": pid, "name": base or pid, "path": dest, "created": True}
+        reg["projects"].append(proj)
+        _save(reg)
+        return proj
+
+
 async def remove_project(pid: str, delete_dir: bool = False) -> bool:
     from .manager import manager
 

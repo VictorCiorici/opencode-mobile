@@ -3,8 +3,11 @@ per-project `opencode serve` instances running on-device or proot."""
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
+import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # Add bundled vendor libraries to python search path if present
@@ -24,21 +27,11 @@ from . import gitops
 from . import models_cfg
 from .manager import manager
 
-app = FastAPI(title="opencode-mobile", version="0.2.0")
-
 PWA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "pwa"))
 
 
-async def auth(request: Request) -> None:
-    if not AUTH_TOKEN:
-        return
-    header = request.headers.get("authorization", "")
-    if header != f"Bearer {AUTH_TOKEN}":
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     async def reaper() -> None:
@@ -46,7 +39,24 @@ async def _startup() -> None:
             await asyncio.sleep(300)
             await manager.reap_idle()
 
-    asyncio.create_task(reaper())
+    task = asyncio.create_task(reaper())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="opencode-mobile", version="0.2.0", lifespan=lifespan)
+
+
+async def auth(request: Request) -> None:
+    if not AUTH_TOKEN:
+        return
+    header = request.headers.get("authorization", "")
+    expected = f"Bearer {AUTH_TOKEN}"
+    if not hmac.compare_digest(header.encode(), expected.encode()) and \
+       not hmac.compare_digest(request.query_params.get("token", "").encode(), AUTH_TOKEN.encode()):
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 # ---------------------------------------------------------------- health ---
@@ -67,7 +77,17 @@ async def health(_: None = Depends(auth)):
 class ProjectIn(BaseModel):
     name: str
     git_init: bool = True
-    branch: str | None = "main"
+    branch: str | None = None
+    initial_branch: str | None = None  # Go-daemon compatible alias
+
+    def resolved_branch(self) -> str:
+        return self.initial_branch or self.branch or "main"
+
+
+class CloneIn(BaseModel):
+    url: str
+    name: str | None = None
+    branch: str | None = None
 
 
 class ImportIn(BaseModel):
@@ -81,7 +101,17 @@ async def list_projects(_: None = Depends(auth)):
 
 @app.post("/api/projects")
 async def create_project(body: ProjectIn, _: None = Depends(auth)):
-    return proj_store.create_project(body.name, body.git_init, body.branch)
+    return proj_store.create_project(body.name, body.git_init, body.resolved_branch())
+
+
+@app.post("/api/projects/clone")
+async def clone_project(body: CloneIn, _: None = Depends(auth)):
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, proj_store.clone_project, body.url, body.name, body.branch
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/projects/{pid}")
@@ -102,19 +132,30 @@ async def import_project(body: ImportIn, _: None = Depends(auth)):
 
 @app.get("/api/browse")
 async def browse(path: str = "", _: None = Depends(auth)):
-    full = os.path.abspath(os.path.expanduser(path)) if path.strip() else str(Path.home())
+    full = os.path.realpath(os.path.abspath(os.path.expanduser(path))) if path.strip() else str(Path.home())
     if not os.path.isdir(full):
         raise HTTPException(400, "not a folder")
     entries = []
     try:
         for e in sorted(os.scandir(full), key=lambda x: (not x.is_dir(), x.name.lower())):
-            if e.name.startswith(".") and e.is_dir():
+            if e.name.startswith(".") and e.name != ".gitignore":
                 continue
-            if e.is_dir():
-                entries.append({"name": e.name, "dir": True})
+            entries.append({
+                "name": e.name,
+                "path": os.path.join(full, e.name),
+                "is_dir": e.is_dir(),
+            })
+            if len(entries) >= 500:
+                break
     except PermissionError:
         pass
-    return {"path": full, "parent": None if full == "/" else os.path.dirname(full), "entries": entries[:500]}
+    parent_dir = os.path.dirname(full)
+    return {
+        "current": full,
+        "path": full,
+        "parent": parent_dir if parent_dir != full else "",
+        "entries": entries,
+    }
 
 
 @app.post("/api/projects/{pid}/stop")
@@ -376,8 +417,13 @@ async def git_log(pid: str, limit: int = 30, _: None = Depends(auth)):
 
 
 @app.get("/git/{pid}/diff")
-async def git_diff(pid: str, staged: bool = False, _: None = Depends(auth)):
+async def git_diff(pid: str, staged: bool = False, file: str = "", path: str = "", _: None = Depends(auth)):
+    """Unified diff. Accepts an optional per-file target via ?file= or ?path=
+    (Go-daemon compatible)."""
     try:
+        target = file or path or ""
+        if target:
+            return {"diff": await gitops.diff_file(_proj_or_404(pid), target, staged)}
         return {"diff": await gitops.diff(_proj_or_404(pid), staged)}
     except gitops.GitError as e:
         raise HTTPException(400, str(e))
@@ -648,6 +694,37 @@ async def git_resolve(pid: str, body: ResolveIn, _: None = Depends(auth)):
         raise HTTPException(400, str(e))
 
 
+# --------------------------------------------------- global git identity ----
+
+class GitIdentityIn(BaseModel):
+    name: str = ""
+    email: str = ""
+
+
+@app.get("/git/config")
+async def get_git_identity(_: None = Depends(auth)):
+    def _cfg(key: str) -> str:
+        try:
+            out = subprocess.run(["git", "config", "--global", key],
+                                 capture_output=True, text=True, check=False)
+            return out.stdout.strip()
+        except Exception:
+            return ""
+    return {"name": _cfg("user.name"), "email": _cfg("user.email")}
+
+
+@app.post("/git/config")
+async def set_git_identity(body: GitIdentityIn, _: None = Depends(auth)):
+    def _set(key: str, value: str) -> None:
+        subprocess.run(["git", "config", "--global", key, value],
+                       capture_output=True, text=True, check=False)
+    if body.name.strip():
+        _set("user.name", body.name.strip())
+    if body.email.strip():
+        _set("user.email", body.email.strip())
+    return {"ok": True}
+
+
 @app.post("/api/terminal/{pid}/exec")
 async def terminal_exec(pid: str, body: ExecIn, _: None = Depends(auth)):
     try:
@@ -666,10 +743,22 @@ class WriteIn(BaseModel):
 
 
 def _safe_join(root: str, rel: str) -> str:
-    full = os.path.abspath(os.path.join(root, rel))
-    if not full.startswith(os.path.abspath(root)):
-        raise HTTPException(400, "path escapes project root")
-    return full
+    abs_root = os.path.realpath(os.path.abspath(root))
+    lexical = os.path.normpath(os.path.abspath(os.path.join(root, rel)))
+    full = lexical
+    if os.path.exists(lexical):
+        full = os.path.realpath(lexical)
+    else:
+        parent = os.path.dirname(lexical)
+        if os.path.exists(parent):
+            full = os.path.join(os.path.realpath(parent), os.path.basename(lexical))
+    for candidate in (abs_root, os.path.abspath(root)):
+        try:
+            if os.path.commonpath([candidate, full]) == candidate:
+                return lexical
+        except ValueError:
+            continue
+    raise HTTPException(400, "path escapes project root")
 
 
 @app.get("/fs/{pid}/read")
@@ -678,11 +767,13 @@ async def fs_read(pid: str, path: str, _: None = Depends(auth)):
     if not os.path.isfile(full):
         raise HTTPException(404, "file not found")
     with open(full, errors="replace") as f:
-        return {"path": path, "content": f.read(1_000_000)}
+        return {"path": path, "content": f.read(2_000_000)}
 
 
 @app.post("/fs/{pid}/write")
 async def fs_write(pid: str, body: WriteIn, _: None = Depends(auth)):
+    if len(body.content) > 8_000_000:
+        raise HTTPException(413, "file too large (8 MB cap)")
     full = _safe_join(_proj_or_404(pid), body.path)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w") as f:
