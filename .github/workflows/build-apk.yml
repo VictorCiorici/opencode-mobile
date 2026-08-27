@@ -42,15 +42,26 @@ jobs:
           cd ..
           ls -lh android/app/src/main/jniLibs/arm64-v8a/libdaemon.so android/app/src/main/assets/bin/openforge-daemon
 
-      - name: Bundle opencode engine (arm64 musl → jniLibs)
+      - name: Bundle opencode engine + glibc runtime (assets)
         run: |
-          mkdir -p /tmp/oc android/app/src/main/jniLibs/arm64-v8a
-          curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64-musl.tar.gz -o /tmp/oc.tar.gz
+          mkdir -p /tmp/oc /tmp/rt/bin /tmp/rt/lib
+          curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64.tar.gz -o /tmp/oc.tar.gz
           tar -xzf /tmp/oc.tar.gz -C /tmp/oc
           BIN=$(find /tmp/oc -type f -name opencode | head -1)
           test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }
-          cp "$BIN" android/app/src/main/jniLibs/arm64-v8a/libopencode.so
-          ls -lh android/app/src/main/jniLibs/arm64-v8a/
+          cp "$BIN" /tmp/rt/bin/opencode
+          # glibc loader + shared libs (Ubuntu 24.04) so the engine can run on
+          # Android, which has neither glibc nor the ELF interp the binary wants.
+          DEB=$(curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/main/g/glibc/" | grep -oE 'libc6_2\.4[0-9]-[0-9a-zA-Z.]*_arm64\.deb' | sort -uV | tail -1)
+          test -n "$DEB" || { echo "no libc6 deb found"; exit 1; }
+          curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/main/g/glibc/$DEB" -o /tmp/libc6.deb
+          mkdir -p /tmp/deb && (cd /tmp/deb && ar x /tmp/libc6.deb)
+          tar -xf /tmp/deb/data.tar.* -C /tmp/deb
+          cp /tmp/deb/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 /tmp/rt/bin/
+          cp /tmp/deb/usr/lib/aarch64-linux-gnu/libc.so.6 /tmp/deb/usr/lib/aarch64-linux-gnu/libm.so.6 \
+             /tmp/deb/usr/lib/aarch64-linux-gnu/libpthread.so.0 /tmp/deb/usr/lib/aarch64-linux-gnu/libdl.so.2 /tmp/rt/lib/
+          (cd /tmp/rt && zip -qr "$GITHUB_WORKSPACE/android/app/src/main/assets/runtime-arm64.zip" .)
+          unzip -l android/app/src/main/assets/runtime-arm64.zip
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3

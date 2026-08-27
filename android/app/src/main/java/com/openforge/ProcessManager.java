@@ -204,14 +204,6 @@ public class ProcessManager {
                 cmd.add("-data"); cmd.add(new File(filesDir, "data").getAbsolutePath());
                 cmd.add("-token"); cmd.add(token);
                 cmd.add("-version"); cmd.add(myVersion);
-                // The bundled opencode engine lives in jniLibs — the only
-                // app-accessible location SELinux allows executing binaries
-                // from (app data dirs are W^X-restricted on API 29+).
-                File engineLib = new File(context.getApplicationInfo().nativeLibraryDir, "libopencode.so");
-                if (engineLib.exists()) {
-                    cmd.add("-opencode"); cmd.add(engineLib.getAbsolutePath());
-                    Log.i(TAG, "Bundled opencode engine at: " + engineLib.getAbsolutePath());
-                }
                 if (webDir.exists()) {
                     cmd.add("-web"); cmd.add(webDir.getAbsolutePath());
                 }

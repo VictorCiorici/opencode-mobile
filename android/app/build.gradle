@@ -8,7 +8,10 @@ android {
     defaultConfig {
         applicationId "com.openforge"
         minSdk 24
-        targetSdk 34
+        // targetSdk 28 intentionally: newer targets make SELinux W^X forbid
+        // exec'ing/dlopen'ing anything extracted into app storage, which the
+        // bundled opencode engine + glibc runtime require. Sideload-only app.
+        targetSdk 28
         versionCode 5
         versionName "0.5.0"
     }
@@ -37,9 +40,6 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            // The bundled opencode engine is a Bun-compiled executable, not a
-            // real shared library — prevent the NDK strip step from touching it.
-            doNotStrip "**/libopencode.so"
         }
     }
     buildFeatures { viewBinding false }

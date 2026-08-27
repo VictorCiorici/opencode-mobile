@@ -20,12 +20,6 @@ public class RuntimeInstaller {
             targetDir.mkdirs();
         }
         try {
-            // Legacy installs extracted the engine into writable app storage,
-            // where SELinux W^X policy forbids executing it — remove stale
-            // copies (the engine now ships via jniLibs/nativeLibraryDir).
-            new File(targetDir, "bin/opencode").delete();
-            new File(targetDir, ".runtime_fp").delete();
-
             copyAssetFolder(context.getAssets(), "web", new File(targetDir, "pwa"));
             copyAssetFolder(context.getAssets(), "bin", new File(targetDir, "bin"));
 

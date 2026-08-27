@@ -372,6 +372,21 @@ func findOpenCodeBinary() string {
 
 var ErrNoEngine = fmt.Errorf("opencode engine not found")
 
+// engineCommand builds the exec for the opencode engine. When the bundled
+// runtime provides a glibc loader next to the engine (Android has no glibc
+// and the binary's ELF interp path does not exist there), the loader is
+// invoked explicitly with a --library-path pointing at the sibling lib dir.
+func engineCommand(bin string, args ...string) *exec.Cmd {
+	dir := filepath.Dir(bin)
+	loader := filepath.Join(dir, "ld-linux-aarch64.so.1")
+	if _, err := os.Stat(loader); err == nil {
+		libs := filepath.Join(filepath.Dir(dir), "lib")
+		full := append([]string{"--library-path", libs, bin}, args...)
+		return exec.Command(loader, full...)
+	}
+	return exec.Command(bin, args...)
+}
+
 // spawnLocked starts `opencode serve` for pid rooted at dir. Callers must
 // hold m.mu and unlock it themselves after registering the instance.
 func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
@@ -381,7 +396,7 @@ func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
 	}
 	port := m.nextPort
 	m.nextPort++
-	cmd := exec.Command(opencodeBin, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
+	cmd := engineCommand(opencodeBin, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
 	cmd.Dir = dir
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -530,7 +545,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	version := ""
 	engineErr := ""
 	if engineFound {
-		out, err := exec.Command(enginePath, "--version").Output()
+		out, err := engineCommand(enginePath, "--version").Output()
 		if err == nil {
 			version = strings.TrimSpace(string(out))
 		} else {
