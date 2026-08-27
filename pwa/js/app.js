@@ -671,18 +671,18 @@ function renderProfiles() {
   try { profiles = JSON.parse(localStorage.getItem("of.profiles") || "[]"); } catch {}
   if (!profiles.length) {
     profiles = [
-      { name: "Local Bridge", url: "" },
-      { name: "SSH Tunnel (:8787)", url: "http://127.0.0.1:8787" }
+      { name: "Standalone Engine", url: "http://127.0.0.1:8787" },
+      { name: "Local Bridge (:8787)", url: "http://127.0.0.1:8787" }
     ];
     localStorage.setItem("of.profiles", JSON.stringify(profiles));
   }
   for (const p of profiles) {
     const chip = document.createElement("span");
-    const isCur = (S.url || "") === (p.url || "");
+    const isCur = (S.url || "http://127.0.0.1:8787") === (p.url || "http://127.0.0.1:8787");
     chip.className = `chip ${isCur ? "cur" : ""}`;
     chip.textContent = p.name;
     chip.onclick = () => {
-      S.url = p.url || "";
+      S.url = p.url || "http://127.0.0.1:8787";
       $("#set-url").value = S.url;
       localStorage.setItem("of.set.url", S.url);
       renderProfiles();
