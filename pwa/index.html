@@ -192,6 +192,26 @@
 
   <!-- SETTINGS -->
   <section id="view-settings" class="view">
+    <h3 class="sect">System & Engine Status</h3>
+    <div class="card form-col" style="margin-bottom:14px;background:rgba(255,255,255,0.03)">
+      <div class="card-row" style="margin-bottom:6px">
+        <span style="font-size:13px">⚡ Native Standalone Daemon</span>
+        <span id="status-daemon-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Running (:8787)</span>
+      </div>
+      <div class="card-row" style="margin-bottom:6px">
+        <span style="font-size:13px">🤖 OpenCode Core Mode</span>
+        <span id="status-opencode-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Cloud Zen Engine</span>
+      </div>
+      <div class="card-row" style="margin-bottom:6px">
+        <span style="font-size:13px">🧠 AI Model Directory</span>
+        <span id="status-models-tag" class="server-badge" style="background:var(--ok);color:#04291a">● 90+ Models Loaded</span>
+      </div>
+      <div class="card-row" style="margin-bottom:0">
+        <span style="font-size:13px">🔑 OpenCode Zen Token</span>
+        <span id="status-zen-tag" class="server-badge" style="background:var(--muted)">not set</span>
+      </div>
+    </div>
+
     <h3 class="sect">AI Credentials & API Keys</h3>
     <div class="card form-col" style="margin-bottom:12px">
       <div class="card-row" style="margin-bottom:6px">

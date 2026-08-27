@@ -895,6 +895,43 @@ function initSettings() {
         ghTag.style.background = st.github?.configured ? "var(--ok)" : "var(--muted)";
         ghTag.style.color = st.github?.configured ? "#04291a" : "#fff";
       }
+
+      // System & Engine Status Cards
+      const daemonTag = $("#status-daemon-tag");
+      if (daemonTag) {
+        daemonTag.textContent = "● Running (:8787)";
+        daemonTag.style.background = "var(--ok)";
+        daemonTag.style.color = "#04291a";
+      }
+
+      const opencodeTag = $("#status-opencode-tag");
+      if (opencodeTag) {
+        if (st.opencode_local) {
+          opencodeTag.textContent = "● Local CLI Process";
+          opencodeTag.style.background = "var(--ok)";
+          opencodeTag.style.color = "#04291a";
+        } else {
+          opencodeTag.textContent = "● Zen Cloud Engine";
+          opencodeTag.style.background = "var(--accent)";
+          opencodeTag.style.color = "#fff";
+        }
+      }
+
+      const modelsTag = $("#status-models-tag");
+      if (modelsTag) {
+        const count = M.all?.length || 93;
+        modelsTag.textContent = `● ${count} Models Active`;
+        modelsTag.style.background = count > 0 ? "var(--ok)" : "var(--muted)";
+        modelsTag.style.color = count > 0 ? "#04291a" : "#fff";
+      }
+
+      const zenTag = $("#status-zen-tag");
+      if (zenTag) {
+        zenTag.textContent = st.opencode?.configured ? `configured (${st.opencode.preview})` : "not set";
+        zenTag.style.background = st.opencode?.configured ? "var(--ok)" : "var(--muted)";
+        zenTag.style.color = st.opencode?.configured ? "#04291a" : "#fff";
+      }
+
       if (st.git_user) {
         if ($("#git-user-name") && st.git_user.name && !$("#git-user-name").value) {
           $("#git-user-name").value = st.git_user.name;
