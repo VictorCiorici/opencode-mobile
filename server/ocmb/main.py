@@ -18,7 +18,7 @@ from . import gitops
 from . import models_cfg
 from .manager import manager
 
-app = FastAPI(title="opencode-mobile", version="0.1.0")
+app = FastAPI(title="opencode-mobile", version="0.2.0")
 
 PWA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "pwa"))
 
