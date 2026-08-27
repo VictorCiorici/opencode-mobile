@@ -15,8 +15,17 @@ const S = {
   url: localStorage.getItem("of.set.url") || "",
 };
 
+function getApiBase() {
+  if (S.url) return S.url;
+  // If served from local file asset or webview domain, route to localhost:8787
+  if (location.protocol === "file:" || location.hostname === "appassets.androidplatform.net" || !location.port) {
+    return "http://127.0.0.1:8787";
+  }
+  return "";
+}
+
 async function api(path, opts = {}) {
-  const base = S.url || "";
+  const base = getApiBase();
   const r = await fetch(base + path, {
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
     ...opts,
@@ -633,7 +642,7 @@ function initSSE() {
   if (sseSource) { sseSource.close(); sseSource = null; }
   if (!S.pid) return;
   try {
-    const base = S.url || "";
+    const base = getApiBase();
     sseSource = new EventSource(`${base}/oc/${S.pid}/event`);
     sseSource.onmessage = (ev) => {
       try {

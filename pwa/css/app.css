@@ -46,12 +46,27 @@ body {
 .dot.off { background: var(--err); }
 
 /* ---------- layout ---------- */
-main { flex: 1; overflow: hidden; }
+main {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
 .view {
-  height: 100%; display: none; flex-direction: column;
-  padding: 12px 12px calc(48px + env(safe-area-inset-bottom));
+  flex: 1;
+  display: none;
+  flex-direction: column;
+  padding: 12px 12px calc(90px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  box-sizing: border-box;
 }
 .view.active { display: flex; }
+#view-chat {
+  overflow-y: hidden;
+  padding-bottom: calc(70px + env(safe-area-inset-bottom));
+}
 
 .card {
   background: var(--surface); border: 1px solid var(--border);
