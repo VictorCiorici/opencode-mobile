@@ -87,14 +87,39 @@ public class ProcessManager {
         }
     }
 
+    /** Millis of the current APK's install — distinguishes builds that share a versionName. */
+    private static String installStamp(Context context) {
+        try {
+            return String.valueOf(context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(), 0).lastUpdateTime);
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    private static String readStoredStamp(Context context) {
+        File f = pidFile(context);
+        if (!f.exists()) return "";
+        try (java.util.Scanner sc = new java.util.Scanner(f)) {
+            if (!sc.hasNextLine()) return "";
+            sc.nextLine(); // pid
+            return sc.hasNextLine() ? sc.nextLine().trim() : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     /**
      * Kills a daemon orphaned by a previous APK update. Native children can
      * outlive the app process, and a healthy-but-old daemon would otherwise
      * block the new binary from ever starting ("already healthy" shortcut).
+     * Version strings alone cannot detect this for same-version rebuilds, so
+     * the pid file also records the installing APK's lastUpdateTime.
      */
-    private static void killStaleDaemon(Context context, String expectedVersion) {
+    private static void killStaleDaemon(Context context, String expectedVersion, String installStamp) {
         String running = runningDaemonVersion();
-        if (running != null && expectedVersion.equals(running)) {
+        if (running != null && expectedVersion.equals(running)
+                && installStamp.equals(readStoredStamp(context))) {
             Log.i(TAG, "Running daemon is current (" + running + "), reusing it");
             return;
         }
@@ -122,17 +147,18 @@ public class ProcessManager {
         } catch (Exception e) {
             myVersion = "unknown";
         }
+        String installStamp = installStamp(context);
 
         if (isServerHealthy("http://127.0.0.1:" + PORT + "/api/health")) {
             String running = runningDaemonVersion();
-            if (myVersion.equals(running)) {
+            if (myVersion.equals(running) && installStamp.equals(readStoredStamp(context))) {
                 Log.i(TAG, "Bridge server is already healthy on 127.0.0.1:" + PORT);
                 return;
             }
             Log.w(TAG, "Port " + PORT + " served by a different daemon (version="
                     + running + ", app=" + myVersion + ") — replacing it");
         }
-        killStaleDaemon(context, myVersion);
+        killStaleDaemon(context, myVersion, installStamp);
 
         File filesDir = context.getFilesDir();
         File webDir = new File(filesDir, "pwa");
@@ -237,7 +263,7 @@ public class ProcessManager {
             long pid = procPid(p);
             if (pid <= 0) return;
             FileOutputStream out = new FileOutputStream(pidFile(context), false);
-            out.write(String.valueOf(pid).getBytes("UTF-8"));
+            out.write((pid + "\n" + installStamp(context)).getBytes("UTF-8"));
             out.close();
         } catch (Throwable ignored) {}
     }

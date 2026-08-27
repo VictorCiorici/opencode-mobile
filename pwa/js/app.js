@@ -1131,7 +1131,7 @@ function initSettings() {
   });
   api("/api/health").then((h) => {
     $("#about-box").innerHTML =
-      `OpenForge v0.3 · bridge <b>${h.bridge}</b><br>` +
+      `OpenForge v${esc(h.daemon_version || "?")} · bridge <b>${h.bridge}</b><br>` +
       `opencode ${esc(h.opencode?.version || "?")} — ` +
       `${h.opencode?.healthy ? "healthy ✓" : "<span style='color:var(--err)'>offline</span>"}`;
   }).catch(() => { $("#about-box").textContent = "Bridge unreachable"; });
