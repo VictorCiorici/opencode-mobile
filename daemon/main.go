@@ -2336,6 +2336,21 @@ func readAuthJSON() map[string]interface{} {
 	if authData == nil {
 		authData = map[string]interface{}{}
 	}
+	// opencode reads api credentials from the "key" field (the shape
+	// `opencode auth login` writes). Older daemon versions wrote "token",
+	// which the engine silently ignores — migrate those entries in memory.
+	for _, v := range authData {
+		obj, ok := v.(map[string]interface{})
+		if !ok || obj["type"] != "api" {
+			continue
+		}
+		if tok, ok := obj["token"].(string); ok && tok != "" {
+			if key, _ := obj["key"].(string); key == "" {
+				obj["key"] = tok
+			}
+			delete(obj, "token")
+		}
+	}
 	return authData
 }
 
@@ -2410,7 +2425,10 @@ func authStatusPayload() blob {
 	authData := readAuthJSON()
 	getTok := func(k string) string {
 		if obj, ok := authData[k].(map[string]interface{}); ok {
-			t, _ := obj["token"].(string)
+			t, _ := obj["key"].(string)
+			if t == "" {
+				t, _ = obj["token"].(string)
+			}
 			return t
 		}
 		return ""
@@ -2468,7 +2486,7 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		if tok == "" {
 			delete(authData, provider)
 		} else {
-			authData[provider] = blob{"type": "api", "token": tok}
+			authData[provider] = blob{"type": "api", "key": tok}
 		}
 		writeAuthJSON(authData)
 		// Drop running engine instances so they respawn with the new creds.
@@ -2629,6 +2647,9 @@ func saveMessages(pid, sid string, list []SessionMsg) {
 // subscriptionToken resolves the stored token for a subscription provider.
 func subscriptionToken(authData map[string]interface{}, providerID string) string {
 	if obj, ok := authData[providerID].(map[string]interface{}); ok {
+		if t, ok := obj["key"].(string); ok && t != "" {
+			return t
+		}
 		if t, ok := obj["token"].(string); ok && t != "" {
 			return t
 		}

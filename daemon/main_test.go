@@ -137,10 +137,15 @@ func TestOpenCodeGoSubscriptionAuth(t *testing.T) {
 		t.Fatal("full token leaked in status preview")
 	}
 
-	// Persisted in auth.json with the shape `opencode auth login` writes.
+	// Persisted in auth.json with the shape `opencode auth login` writes:
+	// an api entry whose credential lives in "key" (the engine ignores
+	// "token"-shaped api entries and would list no models).
 	b, _ := os.ReadFile(authJSONPath())
 	if !strings.Contains(string(b), `"opencode-go"`) || !strings.Contains(string(b), "go_token_12345") {
 		t.Fatalf("auth.json missing opencode-go entry: %s", b)
+	}
+	if !strings.Contains(string(b), `"key": "go_token_12345"`) || strings.Contains(string(b), `"token": "go_token_12345"`) {
+		t.Fatalf("auth.json api entry must use the 'key' field: %s", b)
 	}
 
 	// Endpoint + token routing per subscription tier.
