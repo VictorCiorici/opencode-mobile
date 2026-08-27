@@ -23,10 +23,24 @@ public class RuntimeInstaller {
             copyAssetFolder(context.getAssets(), "web", new File(targetDir, "pwa"));
             copyAssetFolder(context.getAssets(), "bin", new File(targetDir, "bin"));
 
-            // Check for zipped runtime bundle (e.g., runtime-arm64.zip)
+            // Check for zipped runtime bundle (e.g., runtime-arm64.zip).
+            // Extraction is skipped when the bundle is unchanged (same entry
+            // fingerprint already applied) to avoid rewriting ~150 MB on
+            // every service start.
             try (InputStream zipIn = context.getAssets().open("runtime-arm64.zip")) {
-                extractZip(zipIn, targetDir);
-                Log.i(TAG, "Extracted native runtime bundle");
+                String fingerprint = zipFingerprint(zipIn);
+                File marker = new File(targetDir, ".runtime_fp");
+                String applied = marker.exists()
+                        ? new String(readFile(marker)).trim() : "";
+                if (!applied.equals(fingerprint)) {
+                    try (InputStream zipIn2 = context.getAssets().open("runtime-arm64.zip")) {
+                        extractZip(zipIn2, targetDir);
+                    }
+                    writeFile(marker, fingerprint);
+                    Log.i(TAG, "Extracted native runtime bundle (" + fingerprint + ")");
+                } else {
+                    Log.i(TAG, "Runtime bundle unchanged, skipping extraction");
+                }
             } catch (IOException ignored) {
                 // Not bundled or separate assets
             }
@@ -38,6 +52,36 @@ public class RuntimeInstaller {
             Log.i(TAG, "Runtime assets successfully initialized in " + targetDir.getAbsolutePath());
         } catch (Exception e) {
             Log.e(TAG, "Error installing runtime assets", e);
+        }
+    }
+
+    private static String zipFingerprint(InputStream is) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        try (ZipInputStream zis = new ZipInputStream(is)) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                sb.append(entry.getName()).append(':').append(entry.getSize()).append(';');
+                zis.closeEntry();
+            }
+        }
+        return Integer.toHexString(sb.toString().hashCode());
+    }
+
+    private static byte[] readFile(File file) throws IOException {
+        try (InputStream in = new java.io.FileInputStream(file)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int len;
+            while ((len = in.read(buf)) > 0) out.write(buf, 0, len);
+            return out.toByteArray();
+        }
+    }
+
+    private static void writeFile(File file, String content) throws IOException {
+        File parent = file.getParentFile();
+        if (parent != null) parent.mkdirs();
+        try (OutputStream out = new FileOutputStream(file)) {
+            out.write(content.getBytes());
         }
     }
 
