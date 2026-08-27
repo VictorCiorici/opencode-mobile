@@ -20,10 +20,9 @@ public class RuntimeInstaller {
             targetDir.mkdirs();
         }
         try {
-            copyAssetFolder(context.getAssets(), "server", new File(targetDir, "server"));
             copyAssetFolder(context.getAssets(), "web", new File(targetDir, "pwa"));
             copyAssetFolder(context.getAssets(), "bin", new File(targetDir, "bin"));
-            
+
             // Check for zipped runtime bundle (e.g., runtime-arm64.zip)
             try (InputStream zipIn = context.getAssets().open("runtime-arm64.zip")) {
                 extractZip(zipIn, targetDir);
@@ -35,7 +34,6 @@ public class RuntimeInstaller {
             // Recursively set executable permission on all binary directories
             setExecutableRecursive(new File(targetDir, "bin"));
             setExecutableRecursive(new File(targetDir, "usr/bin"));
-            setExecutableRecursive(new File(targetDir, "python/bin"));
 
             Log.i(TAG, "Runtime assets successfully initialized in " + targetDir.getAbsolutePath());
         } catch (Exception e) {

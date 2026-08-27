@@ -1,6 +1,7 @@
 package com.openforge;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.util.Log;
 
 import java.io.File;
@@ -12,9 +13,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class ProcessManager {
     private static final String TAG = "ProcessManager";
+    private static final int PORT = 8787;
     private static ProcessManager instance;
     private Process bridgeProcess;
 
@@ -25,9 +28,20 @@ public class ProcessManager {
         return instance;
     }
 
+    /** Stable per-install bearer token the daemon requires for API access. */
+    public static synchronized String ensureBridgeToken(Context context) {
+        SharedPreferences sp = context.getSharedPreferences("openforge", Context.MODE_PRIVATE);
+        String token = sp.getString("bridge_token", null);
+        if (token == null || token.isEmpty()) {
+            token = UUID.randomUUID().toString().replace("-", "");
+            sp.edit().putString("bridge_token", token).apply();
+        }
+        return token;
+    }
+
     public synchronized void startProcesses(Context context) {
-        if (isServerHealthy("http://127.0.0.1:8787/api/health")) {
-            Log.i(TAG, "Bridge server is already healthy on 127.0.0.1:8787");
+        if (isServerHealthy("http://127.0.0.1:" + PORT + "/api/health")) {
+            Log.i(TAG, "Bridge server is already healthy on 127.0.0.1:" + PORT);
             return;
         }
 
@@ -38,9 +52,10 @@ public class ProcessManager {
         // Default workspace directory
         File defaultWs = new File("/sdcard/OpenForge/projects");
         if (!defaultWs.exists()) {
-            defaultWs.mkdirs();
+            defaultWs.mkdirs(); // may fail without storage permission; fallback below
         }
         String workspacePath = defaultWs.exists() ? defaultWs.getAbsolutePath() : new File(filesDir, "projects").getAbsolutePath();
+        new File(workspacePath, ".keep").getParentFile().mkdirs();
 
         // 1. Check for native static daemon in nativeLibraryDir (standard Android APK installation path)
         File nativeDaemon = new File(context.getApplicationInfo().nativeLibraryDir, "libdaemon.so");
@@ -51,40 +66,35 @@ public class ProcessManager {
             env.put("HOME", filesDir.getAbsolutePath());
             env.put("TMPDIR", context.getCacheDir().getAbsolutePath());
             env.put("OCMB_WORKSPACE", workspacePath);
+            String token = ensureBridgeToken(context);
 
             List<String> cmd = new ArrayList<>();
+            boolean daemonFound = false;
 
             if (nativeDaemon.exists()) {
                 nativeDaemon.setExecutable(true, false);
                 Log.i(TAG, "Starting native static daemon from: " + nativeDaemon.getAbsolutePath());
                 cmd.add(nativeDaemon.getAbsolutePath());
-                cmd.add("-port"); cmd.add("8787");
-                cmd.add("-workspace"); cmd.add(workspacePath);
-                cmd.add("-data"); cmd.add(new File(filesDir, "data").getAbsolutePath());
-                if (webDir.exists()) {
-                    cmd.add("-web"); cmd.add(webDir.getAbsolutePath());
-                }
+                daemonFound = true;
             } else if (extractedDaemon.exists()) {
                 extractedDaemon.setExecutable(true, false);
                 Log.i(TAG, "Starting extracted daemon from: " + extractedDaemon.getAbsolutePath());
                 cmd.add(extractedDaemon.getAbsolutePath());
-                cmd.add("-port"); cmd.add("8787");
+                daemonFound = true;
+            }
+
+            if (daemonFound) {
+                cmd.add("-port"); cmd.add(String.valueOf(PORT));
                 cmd.add("-workspace"); cmd.add(workspacePath);
                 cmd.add("-data"); cmd.add(new File(filesDir, "data").getAbsolutePath());
+                cmd.add("-token"); cmd.add(token);
                 if (webDir.exists()) {
                     cmd.add("-web"); cmd.add(webDir.getAbsolutePath());
                 }
             } else {
-                // Fallback to Python if present
-                File pythonHome = new File(filesDir, "python");
-                File bundledPython = new File(pythonHome, "bin/python3");
-                File serverDir = new File(filesDir, "server");
-                String pythonExec = bundledPython.exists() ? bundledPython.getAbsolutePath() : "python3";
-                cmd.add(pythonExec);
-                cmd.add("-m"); cmd.add("uvicorn"); cmd.add("ocmb.main:app");
-                cmd.add("--app-dir"); cmd.add(serverDir.getAbsolutePath());
-                cmd.add("--host"); cmd.add("127.0.0.1");
-                cmd.add("--port"); cmd.add("8787");
+                // No native daemon was bundled (developer build) — fail loudly in the log.
+                Log.e(TAG, "No daemon binary found; expected libdaemon.so or assets/bin/openforge-daemon");
+                return;
             }
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
