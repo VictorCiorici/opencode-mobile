@@ -50,16 +50,17 @@ jobs:
           BIN=$(find /tmp/oc -type f -name opencode | head -1)
           test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }
           cp "$BIN" /tmp/rt/bin/opencode
-          # glibc loader + shared libs (Ubuntu 24.04) so the engine can run on
-          # Android, which has neither glibc nor the ELF interp the binary wants.
-          DEB=$(curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/main/g/glibc/" | grep -oE 'libc6_2\.4[0-9]-[0-9a-zA-Z.]*_arm64\.deb' | sort -uV | tail -1)
+          # glibc loader + shared libs. Pinned to Debian 12 (glibc 2.36): newer
+          # glibc (2.40+) uses syscalls that Android's app seccomp filter kills
+          # with SIGSYS, while 2.36 is proven to run under it (Termux proot).
+          DEB=$(curl -fsSL "http://deb.debian.org/debian/pool/main/g/glibc/" | grep -oE 'libc6_2\.36-9\+deb12u[0-9]+_arm64\.deb' | sort -uV | tail -1)
           test -n "$DEB" || { echo "no libc6 deb found"; exit 1; }
-          curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/main/g/glibc/$DEB" -o /tmp/libc6.deb
+          curl -fsSL "http://deb.debian.org/debian/pool/main/g/glibc/$DEB" -o /tmp/libc6.deb
           mkdir -p /tmp/deb && (cd /tmp/deb && ar x /tmp/libc6.deb)
           tar -xf /tmp/deb/data.tar.* -C /tmp/deb
-          cp /tmp/deb/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 /tmp/rt/bin/
-          cp /tmp/deb/usr/lib/aarch64-linux-gnu/libc.so.6 /tmp/deb/usr/lib/aarch64-linux-gnu/libm.so.6 \
-             /tmp/deb/usr/lib/aarch64-linux-gnu/libpthread.so.0 /tmp/deb/usr/lib/aarch64-linux-gnu/libdl.so.2 /tmp/rt/lib/
+          GL=/tmp/deb/lib/aarch64-linux-gnu; [ -f "$GL/libc.so.6" ] || GL=/tmp/deb/usr/lib/aarch64-linux-gnu
+          cp "$GL/ld-linux-aarch64.so.1" /tmp/rt/bin/
+          cp "$GL/libc.so.6" "$GL/libm.so.6" "$GL/libpthread.so.0" "$GL/libdl.so.2" /tmp/rt/lib/
           (cd /tmp/rt && zip -qr "$GITHUB_WORKSPACE/android/app/src/main/assets/runtime-arm64.zip" .)
           unzip -l android/app/src/main/assets/runtime-arm64.zip
 
