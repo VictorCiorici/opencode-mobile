@@ -16,7 +16,7 @@ const S = {
 };
 
 function getApiBase() {
-  if (S.url) return S.url;
+  if (S.url && S.url.startsWith("http")) return S.url;
   // If served from local file asset or webview domain, route to localhost:8787
   if (location.protocol === "file:" || location.hostname === "appassets.androidplatform.net" || !location.port) {
     return "http://127.0.0.1:8787";
@@ -31,12 +31,23 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  const ct = r.headers.get("content-type") || "";
   if (!r.ok) {
     let msg = `${r.status}`;
-    try { const j = await r.json(); msg = j.detail || msg; } catch {}
+    if (ct.includes("json")) {
+      try { const j = await r.json(); msg = j.detail || j.error || msg; } catch {}
+    }
     throw new Error(msg);
   }
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null;
+  if (!ct.includes("json")) {
+    const text = await r.text();
+    if (text.trim().startsWith("<")) {
+      throw new Error("Daemon connection error — received HTML instead of JSON");
+    }
+    try { return JSON.parse(text); } catch { return text; }
+  }
+  return r.json();
 }
 const oc = (p, o) => api(`/oc/${S.pid}${p}`, o);
 const git = (a, o) => api(`/git/${S.pid}/${a}`, o);

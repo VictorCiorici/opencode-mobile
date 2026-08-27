@@ -778,7 +778,42 @@ func handleRegisterLocal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "config": fullCfg})
 }
 
+// Fetch live models dynamically from models.dev (OpenCode's official live models registry)
+func fetchLiveOpenCodeModels() map[string]interface{} {
+	cachePath := filepath.Join(cfg.DataDir, "models_cache.json")
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("https://models.dev/api.json")
+	if err == nil && resp.StatusCode == 200 {
+		var liveData map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&liveData); err == nil {
+			resp.Body.Close()
+			b, _ := json.Marshal(liveData)
+			os.WriteFile(cachePath, b, 0644)
+			return liveData
+		}
+		resp.Body.Close()
+	}
+
+	// Fallback to cached copy
+	var cachedData map[string]interface{}
+	b, err := os.ReadFile(cachePath)
+	if err == nil {
+		json.Unmarshal(b, &cachedData)
+	}
+	return cachedData
+}
+
 func handleModels(w http.ResponseWriter, r *http.Request) {
+	// If opencode serve is alive on :4100, proxy directly to it
+	if isOpenCodeAlive() {
+		target, _ := url.Parse("http://127.0.0.1:4100")
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		r.URL.Path = "/provider"
+		proxy.ServeHTTP(w, r)
+		return
+	}
+
 	home, _ := os.UserHomeDir()
 	cfgPath := filepath.Join(home, ".config/opencode/opencode.json")
 	authPath := filepath.Join(home, ".local/share/opencode/auth.json")
@@ -794,6 +829,13 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	ab, _ := os.ReadFile(authPath)
 	json.Unmarshal(ab, &authData)
 
+	hasZenToken := false
+	if authData != nil && authData["opencode"] != nil {
+		if tok, ok := authData["opencode"]["token"].(string); ok && tok != "" {
+			hasZenToken = true
+		}
+	}
+
 	type ProvInfo struct {
 		ID     string                 `json:"id"`
 		Name   string                 `json:"name"`
@@ -801,38 +843,34 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	var list []ProvInfo
 
-	// 1. Built-in OpenCode Zen Models (Always enabled when token or default exists)
-	list = append(list, ProvInfo{
-		ID:   "opencode",
-		Name: "OpenCode Zen",
-		Models: map[string]interface{}{
-			"claude-3-7-sonnet": map[string]interface{}{"name": "Claude 3.7 Sonnet (Thinking)"},
-			"claude-3-5-sonnet": map[string]interface{}{"name": "Claude 3.5 Sonnet"},
-			"gemini-2.5-pro":    map[string]interface{}{"name": "Gemini 2.5 Pro"},
-			"gemini-2.5-flash":  map[string]interface{}{"name": "Gemini 2.5 Flash"},
-			"gpt-4o":            map[string]interface{}{"name": "GPT-4o"},
-			"deepseek-r1":       map[string]interface{}{"name": "DeepSeek R1 (Reasoning)"},
-			"deepseek-v3":       map[string]interface{}{"name": "DeepSeek V3"},
-			"o3-mini":           map[string]interface{}{"name": "OpenAI o3-mini"},
-		},
-	})
+	// Fetch dynamic models from OpenCode models directory
+	allLiveProviders := fetchLiveOpenCodeModels()
 
-	// 2. Google Gemini Models
-	list = append(list, ProvInfo{
-		ID:   "google",
-		Name: "Google Gemini",
-		Models: map[string]interface{}{
-			"gemini-2.5-pro":   map[string]interface{}{"name": "Gemini 2.5 Pro"},
-			"gemini-2.5-flash": map[string]interface{}{"name": "Gemini 2.5 Flash"},
-			"gemini-1.5-pro":   map[string]interface{}{"name": "Gemini 1.5 Pro"},
-			"gemini-1.5-flash": map[string]interface{}{"name": "Gemini 1.5 Flash"},
-		},
-	})
+	// 1. Dynamic OpenCode Zen models from models.dev
+	if opencodeLive, ok := allLiveProviders["opencode"].(map[string]interface{}); ok {
+		name, _ := opencodeLive["name"].(string)
+		if name == "" {
+			name = "OpenCode Zen"
+		}
+		mMap, _ := opencodeLive["models"].(map[string]interface{})
+		list = append(list, ProvInfo{ID: "opencode", Name: name, Models: mMap})
+	} else if hasZenToken {
+		list = append(list, ProvInfo{ID: "opencode", Name: "OpenCode Zen", Models: map[string]interface{}{}})
+	}
 
-	// 3. Custom Providers from opencode.json (Ollama, LM Studio, etc.)
+	// 2. Dynamic Google Gemini models from models.dev if configured
+	if os.Getenv("GEMINI_API_KEY") != "" {
+		if googleLive, ok := allLiveProviders["google"].(map[string]interface{}); ok {
+			name, _ := googleLive["name"].(string)
+			mMap, _ := googleLive["models"].(map[string]interface{})
+			list = append(list, ProvInfo{ID: "google", Name: name, Models: mMap})
+		}
+	}
+
+	// 3. User configured providers from opencode.json
 	providersMap, _ := fullCfg["provider"].(map[string]interface{})
 	for id, p := range providersMap {
-		if id == "opencode" || id == "google" {
+		if id == "opencode" {
 			continue
 		}
 		if pObj, ok := p.(map[string]interface{}); ok {
@@ -852,8 +890,8 @@ func handleFavorites(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := os.ReadFile(favPath)
 	json.Unmarshal(b, &favs)
-	if favs.Favorites == nil || len(favs.Favorites) == 0 {
-		favs.Favorites = []string{"opencode/claude-3-7-sonnet", "opencode/gemini-2.5-pro", "google/gemini-2.5-flash"}
+	if favs.Favorites == nil {
+		favs.Favorites = []string{}
 	}
 
 	if r.Method == http.MethodGet {
