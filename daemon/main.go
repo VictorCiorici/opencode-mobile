@@ -378,15 +378,41 @@ var ErrNoEngine = fmt.Errorf("opencode engine not found")
 // invoked explicitly with a --library-path pointing at the sibling lib dir.
 func engineCommand(bin string, args ...string) *exec.Cmd {
 	dir := filepath.Dir(bin)
+
+	// Engine (Bun) needs a writable temp/cache dir; Android provides no
+	// /tmp, so point it at the app's private files dir.
+	filesDir := filepath.Dir(dir)
+	tmpDir := filepath.Join(filesDir, "tmp")
+	_ = os.MkdirAll(tmpDir, 0o755)
+	baseEnv := append(os.Environ(),
+		"TMPDIR="+tmpDir,
+		"HOME="+filesDir,
+		"XDG_CACHE_HOME="+tmpDir,
+		"XDG_CONFIG_HOME="+tmpDir,
+		"XDG_DATA_HOME="+tmpDir,
+	)
+
+	// Preferred: musl runtime. Android's app seccomp policy kills syscalls
+	// glibc makes at startup (set_robust_list=99 on arm64 is unconditionally
+	// SIGSYS-killed on some devices; clone3=435 / rseq=293 are also
+	// blocked), and RET_KILL outranks any ERRNO shim we could stack, so
+	// glibc builds cannot run in-process at all. The musl loader avoids all
+	// of them (musl never calls set_robust_list/rseq/clone3).
+	muslLoader := filepath.Join(dir, "ld-musl-aarch64.so.1")
+	if _, err := os.Stat(muslLoader); err == nil {
+		full := append([]string{"--library-path", dir, bin}, args...)
+		cmd := exec.Command(muslLoader, full...)
+		cmd.Env = baseEnv
+		return cmd
+	}
+
+	// Fallback: glibc loader (desktop/dev builds).
 	loader := filepath.Join(dir, "ld-linux-aarch64.so.1")
 	if _, err := os.Stat(loader); err == nil {
-		libs := filepath.Join(filepath.Dir(dir), "lib")
+		libs := filepath.Join(filesDir, "lib")
 		full := append([]string{"--library-path", libs, bin}, args...)
 		cmd := exec.Command(loader, full...)
-		// Android's app seccomp filter does not allowlist rseq(2), which
-		// glibc registers at startup — SIGSYS ("bad system call") without
-		// this. Harmless on kernels where it is allowed.
-		cmd.Env = append(os.Environ(), "GLIBC_TUNABLES=glibc.pthread.rseq=0")
+		cmd.Env = append(baseEnv, "GLIBC_TUNABLES=glibc.pthread.rseq=0")
 		return cmd
 	}
 	return exec.Command(bin, args...)

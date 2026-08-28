@@ -13,7 +13,7 @@ causes, fixes shipped (commit hashes), and what remains open.
 | 2 | Keys (Zen / Go) lost after every APK update | Stale-daemon detection compared `versionName`, which never changed between builds → old daemon kept serving :8787 | **Fixed** | `7c71441` |
 | 3 | Subscription models never listed even with keys set | Daemon wrote auth.json entries as `{"type":"api","token":…}`; opencode only honors `"key"` | **Fixed** | `4e8e90c` |
 | 4 | Settings said "93 Models Active" while Models tab was empty | UI faked the count (`M.all?.length \|\| 93`) | **Fixed** | `37bd2e2` |
-| 5 | Engine "found" but never runs; version always `?` | Binary not bundled at first; then a chain of exec failures (see below) | **In progress** | `7f90db7`, `280601e` |
+| 5 | Engine "found" but never runs; version always `?` | Binary not bundled at first; then a chain of exec failures (see below) | **Fixed** (5e: musl runtime) | `7f90db7`, `280601e` |
 | 6 | Cold engine spawn timed out on mobile | `waitHealthy` gave up after 12 s | **Fixed** (25 s) | `37bd2e2` |
 | 7 | models.dev catalog empty on slow networks | 3 s fetch timeout | **Fixed** (8 s) | `37bd2e2` |
 | 8 | About box showed hardcoded "v0.3", no diagnostics | Static string; no error surfacing | **Fixed** | `7c71441`, `7c8df65` |
@@ -55,15 +55,43 @@ is proven to run under this device's filter (Termux proot daily use).
 → CI pins `libc6_2.36-9+deb12u*_arm64.deb` from the Debian pool. Commit:
 `280601e`.
 
-### 5e. `signal: bad system call` persists with glibc 2.36 — **OPEN**
+### 5e. `signal: bad system call` persists with glibc 2.36 — **FIXED (musl)**
 Termux's proot shields its tracees from some seccomp traps (it intercepts and
 rewrites syscalls); a directly-spawned loader+engine does not get that
-protection. Prime suspect: **`rseq(2)`** — glibc ≥ 2.35 registers it at
-startup, bionic never calls it, so Android's allowlist lacks it.
+protection.
 
-Shipped prophylaxis: the daemon now sets
-`GLIBC_TUNABLES=glibc.pthread.rseq=0` for every engine spawn (commit on
-branch; build in flight). Manual drawer verification is pending.
+**Root cause, identified live on-device** (ptrace tracer shim
+`android/engine/seccomp-trace.c` installed as the loader; its stderr —
+`SIGSYS-SYSCALL=99 arch=0xc00000b7 code=1` — is surfaced by
+`/api/health.opencode.error`): Android's app seccomp filter **kills
+`set_robust_list` (99 on arm64)**, which glibc calls unconditionally at
+startup for every thread. `code=1` = `SECCOMP_RET_KILL_THREAD` — the SIGSYS
+is *uncatchable*, and since stacked seccomp filters resolve to the
+highest-precedence action, a `RET_ERRNO` shim cannot neutralize it either.
+`clone3` (435) and `rseq` (293) are also not allowlisted. This is why:
+
+- `GLIBC_TUNABLES=glibc.pthread.rseq=0` did not help (set_robust_list comes
+  first),
+- an in-loader seccomp `RET_ERRNO` shim could not help (KILL outranks ERRNO),
+- every `run-as`/adb repro attempt succeeded — `run-as` never inherits the
+  zygote-installed app filter, so the bug only manifests for daemon-spawned
+  engines.
+
+**Fix: switch the runtime to musl** (musl never calls `set_robust_list`,
+`rseq`, or `clone3`):
+
+- engine: `opencode-linux-arm64-musl.tar.gz` (Bun musl build) — links against
+  Alpine `libstdc++.so.6` + `libgcc_s.so.1`, loaded via Alpine's
+  `ld-musl-aarch64.so.1` with `--library-path <binDir>`.
+- daemon `engineCommand` prefers `ld-musl-aarch64.so.1`; the glibc loader
+  path remains only as a desktop/dev fallback.
+- daemon also sets `TMPDIR`/`HOME`/`XDG_{CACHE,CONFIG,DATA}_HOME` to
+  `files/tmp` — Android has no writable `/tmp`, so Bun aborted with
+  `EACCES: mkdir '/tmp/opencode'` right after printing its banner (seen only
+  once the SIGSYS was gone).
+
+Verified end-to-end on-device (Z Fold5, daemon-spawned engine under the app
+seccomp policy): `/api/health` → `"version":"1.18.25"`, `error:""`.
 
 ---
 
@@ -90,51 +118,28 @@ curl -s http://127.0.0.1:4100/config/providers | head -c 300
 Useful drawer one-liners (single shell per command — no `cd` persistence):
 
 ```sh
-F=/data/data/com.openforge/files; $F/bin/ld-linux-aarch64.so.1 --library-path $F/lib $F/bin/opencode --version
+F=/data/data/com.openforge/files; $F/bin/ld-musl-aarch64.so.1 --library-path $F/bin $F/bin/opencode --version
 ```
 
 ---
 
-## Next steps — decision tree
+## Follow-ups worth doing
 
-### If the rseq tunable fixes it (`1.18.23` in drawer test)
-1. Confirm the new APK shows `opencode 1.18.x — healthy ✓` in the About box.
-2. Open Models tab → expect Zen/Go models with badge `(engine)`.
-3. Re-save keys once if they were cleared (auth entries self-heal via the
-   read-side migration, commit `4e8e90c`).
-4. Close out: bump `versionCode`, tag a release.
-
-### If SIGSYS persists (rseq was not the only blocked syscall)
-Ordered strategies, cheapest first:
-
-1. **Isolate the syscall** — the app is a debug build (ptrace allowed):
-   bundle a static `strace` (aarch64) into the runtime zip and run
-   `strace -f -e trace=none -o /dev/null loader engine --version` from the
-   drawer to catch the exact SIGSYS syscall number (si_syscall), then add a
-   targeted workaround/tunable.
-2. **More tunables** — candidates: `glibc.mem.tagging=0`, `glibc.cpu.hwcaps`,
-   and bun-side env (`BUN_…`). Cheap to try; each is a one-line env addition
-   in `engineCommand`.
-3. **proot wrapper (battle-tested)** — bundle a static `proot` (aarch64) plus
-   a minimal rootfs; spawn the engine as
-   `proot -0 -r <rootfs> <loader> <engine> serve …`. This is exactly the
-   mechanism the user's Termux Debian uses and is proven to shield glibc from
-   Android's filter on this device. Cost: ~2–5 MB extra, some spawn latency.
-4. **bionic-native engine** — investigate the Termux `opencode` package
-   (built against bionic, needs no glibc). If redistributable, it may run
-   without any loader wrapper; must verify its `$PREFIX` dependencies.
-
-### Unrelated follow-ups worth doing
 - `findOpenCodeBinary` still probes a `/data/data/com.openforge/lib` symlink
   that modern Android no longer creates — dead candidate, can be removed.
+- The glibc fallback branch in `engineCommand` (loader + `rseq=0` tunable) is
+  now desktop/dev-only; consider deleting it once Android-only.
 - `RuntimeInstaller` re-copies the whole `web`/`bin` asset tree on every
   service start (only the runtime zip is fingerprint-skipped) — extend the
   fingerprint to cover those too.
-- Python bridge (`server/`) never had the fake fallback, but its auth writer
-  and model listing should be audited for the same `"key"` vs `"token"`
-  contract (`auth_cfg.py` already writes `"key"` ✓).
+- Python bridge (`server/`): audit its auth writer for the same `"key"` vs
+  `"token"` contract (`auth_cfg.py` already writes `"key"` ✓).
 - Consider surfacing `health.opencode.path/error` in the Settings engine
   section (currently only the About box shows it).
+- Re-test on a second device/Android version: the blocked-syscall set
+  (`set_robust_list`/`clone3`/`rseq`) varies by OEM policy; musl sidesteps
+  all three, but Bun may still probe other syscalls on exotic builds
+  (`seccomp-trace.c` will name the culprit via the health error field).
 
 ---
 
@@ -142,11 +147,12 @@ Ordered strategies, cheapest first:
 
 | Area | File |
 |------|------|
-| Engine spawn + loader wrapper + rseq env | `daemon/main.go` (`engineCommand`, `spawnLocked`, `handleHealth`) |
+| Engine spawn + musl loader + TMPDIR/HOME env | `daemon/main.go` (`engineCommand`, `spawnLocked`, `handleHealth`) |
 | Engine binary lookup paths | `daemon/main.go` (`findOpenCodeBinary`) |
+| ptrace SIGSYS tracer (debug tool; expose blocked syscall via health error) | `android/engine/seccomp-trace.c` |
 | Auth save/read + legacy migration | `daemon/main.go` (`handleAuthToken`, `readAuthJSON`) |
 | Model listing sources (engine → catalog → config) | `daemon/main.go` (`handleModels`, `catalogProviders`, `fetchEngineProviders`) |
 | Runtime bundle extraction + fingerprint | `android/app/src/main/java/com/openforge/RuntimeInstaller.java` |
 | Daemon lifecycle / stale replacement / install stamp | `android/app/src/main/java/com/openforge/ProcessManager.java` |
-| CI bundling (engine + glibc runtime zip) | `.github/workflows/build-apk.yml` |
+| CI bundling (engine + musl runtime zip) | `.github/workflows/build-apk.yml` |
 | targetSdk decision | `android/app/build.gradle` (targetSdk 28, with rationale) |

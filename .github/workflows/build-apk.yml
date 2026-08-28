@@ -42,25 +42,32 @@ jobs:
           cd ..
           ls -lh android/app/src/main/jniLibs/arm64-v8a/libdaemon.so android/app/src/main/assets/bin/openforge-daemon
 
-      - name: Bundle opencode engine + glibc runtime (assets)
+      - name: Bundle opencode engine + musl runtime (assets)
         run: |
-          mkdir -p /tmp/oc /tmp/rt/bin /tmp/rt/lib
-          curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64.tar.gz -o /tmp/oc.tar.gz
+          mkdir -p /tmp/oc /tmp/rt/bin
+          # musl build: musl never calls set_robust_list(99)/rseq(293)/
+          # clone3(435), which Android's app seccomp policy SIGSYS-kills
+          # (RET_KILL outranks any stacked ERRNO shim, so glibc builds
+          # cannot run in-process at all).
+          curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64-musl.tar.gz -o /tmp/oc.tar.gz
           tar -xzf /tmp/oc.tar.gz -C /tmp/oc
           BIN=$(find /tmp/oc -type f -name opencode | head -1)
           test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }
           cp "$BIN" /tmp/rt/bin/opencode
-          # glibc loader + shared libs. Pinned to Debian 12 (glibc 2.36): newer
-          # glibc (2.40+) uses syscalls that Android's app seccomp filter kills
-          # with SIGSYS, while 2.36 is proven to run under it (Termux proot).
-          DEB=$(curl -fsSL "http://deb.debian.org/debian/pool/main/g/glibc/" | grep -oE 'libc6_2\.36-9\+deb12u[0-9]+_arm64\.deb' | sort -uV | tail -1)
-          test -n "$DEB" || { echo "no libc6 deb found"; exit 1; }
-          curl -fsSL "http://deb.debian.org/debian/pool/main/g/glibc/$DEB" -o /tmp/libc6.deb
-          mkdir -p /tmp/deb && (cd /tmp/deb && ar x /tmp/libc6.deb)
-          tar -xf /tmp/deb/data.tar.* -C /tmp/deb
-          GL=/tmp/deb/lib/aarch64-linux-gnu; [ -f "$GL/libc.so.6" ] || GL=/tmp/deb/usr/lib/aarch64-linux-gnu
-          cp "$GL/ld-linux-aarch64.so.1" /tmp/rt/bin/
-          cp "$GL/libc.so.6" "$GL/libm.so.6" "$GL/libpthread.so.0" "$GL/libdl.so.2" /tmp/rt/lib/
+          # musl loader + C++ runtime from Alpine (all land in bin/ next to
+          # the engine; the daemon invokes ld-musl with --library-path bin).
+          ALPINE=https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64
+          fetch() { # fetch <apk-name> <file...>
+            local apk="$1"; shift
+            curl -fsSL "$ALPINE/$apk" -o /tmp/pkg.apk
+            rm -rf /tmp/pkgx && mkdir -p /tmp/pkgx && tar -xzf /tmp/pkg.apk -C /tmp/pkgx
+            for f in "$@"; do
+              find /tmp/pkgx -type f -name "$f" -exec cp {} /tmp/rt/bin/ \;
+            done
+          }
+          fetch musl-1.2.4_git20230717-r6.apk ld-musl-aarch64.so.1
+          fetch 'libstdc++-13.2.1_git20231014-r0.apk' libstdc++.so.6
+          fetch libgcc-13.2.1_git20231014-r0.apk libgcc_s.so.1
           (cd /tmp/rt && zip -qr "$GITHUB_WORKSPACE/android/app/src/main/assets/runtime-arm64.zip" .)
           unzip -l android/app/src/main/assets/runtime-arm64.zip
 
