@@ -19,7 +19,30 @@ Continuation notes for development on another device. Read together with
 - Model listing sources: engine `/config/providers` → models.dev catalog →
   config providers. Fake fallback catalog removed. UI badge honest.
 
-## OPEN Problem 6 — Zen/Go keys not persisted after relaunch; only 6 default models
+## OPEN Problem 6 — Zen/Go keys not persisted after relaunch; only 6 default models — **FIXED**
+
+**Root cause (found 2026-08-29, verified on-device):** a regression introduced
+by the musl fix in `0a0e993`. `engineCommand` set
+`XDG_DATA_HOME=<files>/tmp` (and `XDG_CONFIG_HOME`) for the engine. opencode
+resolves its data dir via `XDG_DATA_HOME` when set, so the **engine** looked
+for credentials in `files/tmp/opencode/auth.json` while the daemon writes
+them to `files/.local/share/opencode/auth.json` (HOME-based). The engine
+therefore never saw any credential: `opencode-go` was missing from
+`/config/providers` and Zen listed only its free tier.
+
+Fixes shipped:
+
+- `daemon/main.go` `engineCommand`: only `TMPDIR` and `XDG_CACHE_HOME` point
+  at `files/tmp`; `HOME=filesDir` stays and DATA/CONFIG are **not**
+  redirected, so engine and daemon resolve the same auth.json.
+- `writeAuthJSON` now returns errors; `/api/auth/token` surfaces save
+  failures as HTTP 500 (`auth save failed: …`) instead of failing silently.
+- versionCode/Name bumped to 6 / 0.5.1 for on-device identification.
+
+Verified end-to-end on-device (Fold5, daemon-spawned engine):
+`/api/auth/status` shows both keys configured; `/api/models` →
+`source:"engine"` with `opencode` (60 models) **and** `opencode-go`
+(24 models).
 
 Symptoms reported on-device (v0.5.0, musl runtime build):
 

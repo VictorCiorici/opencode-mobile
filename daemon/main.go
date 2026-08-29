@@ -380,7 +380,12 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 	dir := filepath.Dir(bin)
 
 	// Engine (Bun) needs a writable temp/cache dir; Android provides no
-	// /tmp, so point it at the app's private files dir.
+	// /tmp, so point TMPDIR and XDG_CACHE_HOME at the app's private files
+	// dir. DATA/CONFIG must NOT be redirected: opencode resolves auth.json
+	// (and opencode.json) via XDG_DATA_HOME/XDG_CONFIG_HOME when set, and
+	// the daemon writes auth at $HOME/.local/share/opencode/auth.json —
+	// the engine must resolve the same file (HOME=filesDir) or credentials
+	// silently never reach it (Problem 6).
 	filesDir := filepath.Dir(dir)
 	tmpDir := filepath.Join(filesDir, "tmp")
 	_ = os.MkdirAll(tmpDir, 0o755)
@@ -388,8 +393,6 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 		"TMPDIR="+tmpDir,
 		"HOME="+filesDir,
 		"XDG_CACHE_HOME="+tmpDir,
-		"XDG_CONFIG_HOME="+tmpDir,
-		"XDG_DATA_HOME="+tmpDir,
 	)
 
 	// Preferred: musl runtime. Android's app seccomp policy kills syscalls
@@ -2426,10 +2429,15 @@ func readAuthJSON() map[string]interface{} {
 	return authData
 }
 
-func writeAuthJSON(data map[string]interface{}) {
-	os.MkdirAll(filepath.Dir(authJSONPath()), 0700)
-	out, _ := json.MarshalIndent(data, "", "  ")
-	writeFileSecret(authJSONPath(), out)
+func writeAuthJSON(data map[string]interface{}) error {
+	if err := os.MkdirAll(filepath.Dir(authJSONPath()), 0o700); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileSecret(authJSONPath(), out)
 }
 
 func lookupProviderKey(id string) string {
@@ -2560,7 +2568,10 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		} else {
 			authData[provider] = blob{"type": "api", "key": tok}
 		}
-		writeAuthJSON(authData)
+		if err := writeAuthJSON(authData); err != nil {
+			writeErr(w, http.StatusInternalServerError, "auth save failed: "+err.Error())
+			return
+		}
 		// Drop running engine instances so they respawn with the new creds.
 		instMgr.StopAll()
 	case "github":
@@ -2570,7 +2581,10 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		} else {
 			authData["github"] = blob{"type": "token", "token": tok}
 		}
-		writeAuthJSON(authData)
+		if err := writeAuthJSON(authData); err != nil {
+			writeErr(w, http.StatusInternalServerError, "auth save failed: "+err.Error())
+			return
+		}
 		saveGitHubCredentials(tok)
 	default:
 		// Provider API keys go into the global opencode config.
