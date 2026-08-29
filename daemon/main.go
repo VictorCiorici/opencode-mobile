@@ -1047,7 +1047,13 @@ func configureGitSafeDir() {
 }
 
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	// safe.directory=* lets git operate on repos owned by other uids (e.g.
+	// folders cloned/edited via Termux). Without it, git aborts with
+	// "dubious ownership" and the project looks like "not a git repository".
+	// Passing it per-invocation avoids any dependence on global gitconfig
+	// state (which may fail to write).
+	full := append([]string{"-c", "safe.directory=*"}, args...)
+	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out
