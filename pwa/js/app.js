@@ -145,6 +145,7 @@ $$("#bottom-nav button").forEach((b) =>
     if (b.dataset.view === "git") loadGit();
     if (b.dataset.view === "models") loadModels();
     if (b.dataset.view === "files") loadFiles(S.filesPath);
+    if (b.dataset.view === "settings") loadAuthStatus();
   })
 );
 
@@ -828,6 +829,104 @@ function applySettings() {
     localStorage.getItem("of.set.meta") !== "1");
 }
 
+/* Auth status: refreshes engine/credential badges in Settings. Top-level so
+   boot() and the nav switch handler can call it (was nested in
+   initSettings() → ReferenceError → badges stuck on "not set"). */
+async function loadAuthStatus() {
+  try {
+    const st = await api("/api/auth/status");
+    const ocTag = $("#auth-tag-opencode");
+    if (ocTag) {
+      ocTag.textContent = st.opencode?.configured ? `configured (${st.opencode.preview})` : "not set";
+      ocTag.style.background = st.opencode?.configured ? "var(--ok)" : "var(--muted)";
+      ocTag.style.color = st.opencode?.configured ? "#04291a" : "#fff";
+    }
+    const gemTag = $("#auth-tag-gemini");
+    if (gemTag) {
+      gemTag.textContent = st.gemini?.configured ? `configured (${st.gemini.preview})` : "not set";
+      gemTag.style.background = st.gemini?.configured ? "var(--ok)" : "var(--muted)";
+      gemTag.style.color = st.gemini?.configured ? "#04291a" : "#fff";
+    }
+    const ghTag = $("#auth-tag-github");
+    if (ghTag) {
+      ghTag.textContent = st.github?.configured ? `configured (${st.github.preview})` : "not set";
+      ghTag.style.background = st.github?.configured ? "var(--ok)" : "var(--muted)";
+      ghTag.style.color = st.github?.configured ? "#04291a" : "#fff";
+    }
+    const goTag = $("#auth-tag-opencodego");
+    if (goTag) {
+      goTag.textContent = st["opencode-go"]?.configured ? `configured (${st["opencode-go"].preview})` : "not set";
+      goTag.style.background = st["opencode-go"]?.configured ? "var(--ok)" : "var(--muted)";
+      goTag.style.color = st["opencode-go"]?.configured ? "#04291a" : "#fff";
+    }
+
+    // System & Engine Status Cards
+    const daemonTag = $("#status-daemon-tag");
+    if (daemonTag) {
+      daemonTag.textContent = "● Running (:8787)";
+      daemonTag.style.background = "var(--ok)";
+      daemonTag.style.color = "#04291a";
+    }
+
+    const opencodeTag = $("#status-opencode-tag");
+    if (opencodeTag) {
+      if (st.opencode_local) {
+        opencodeTag.textContent = "● Local CLI Process";
+        opencodeTag.style.background = "var(--ok)";
+        opencodeTag.style.color = "#04291a";
+      } else {
+        opencodeTag.textContent = "● Zen Cloud Engine";
+        opencodeTag.style.background = "var(--accent)";
+        opencodeTag.style.color = "#fff";
+      }
+    }
+
+    const modelsTag = $("#status-models-tag");
+    if (modelsTag) {
+      const count = M.all?.length || 0;
+      if (count > 0) {
+        const src = M.source ? ` (${M.source})` : "";
+        modelsTag.textContent = `● ${count} Models Active${src}`;
+        modelsTag.style.background = "var(--ok)";
+        modelsTag.style.color = "#04291a";
+      } else {
+        modelsTag.textContent = "● No Models";
+        modelsTag.style.background = "var(--muted)";
+        modelsTag.style.color = "#fff";
+      }
+    }
+
+    const zenTag = $("#status-zen-tag");
+    if (zenTag) {
+      zenTag.textContent = st.opencode?.configured ? `Zen ✓ ${st.opencode.preview}` : "Zen not set";
+      zenTag.style.background = st.opencode?.configured ? "var(--ok)" : "var(--muted)";
+      zenTag.style.color = st.opencode?.configured ? "#04291a" : "#fff";
+    }
+
+    const goStatusTag = $("#status-go-tag");
+    if (goStatusTag) {
+      const cfg = st["opencode-go"]?.configured;
+      goStatusTag.textContent = cfg ? `Go ✓ ${st["opencode-go"].preview}` : "Go not set";
+      goStatusTag.style.background = cfg ? "var(--ok)" : "var(--muted)";
+      goStatusTag.style.color = cfg ? "#04291a" : "#fff";
+    }
+
+    if (st.git_user) {
+      if ($("#git-user-name") && st.git_user.name && !$("#git-user-name").value) {
+        $("#git-user-name").value = st.git_user.name;
+      }
+      if ($("#git-user-email") && st.git_user.email && !$("#git-user-email").value) {
+        $("#git-user-email").value = st.git_user.email;
+      }
+    }
+  } catch (e) {
+    if (!loadAuthStatus._warned || Date.now() - loadAuthStatus._warned > 15000) {
+      loadAuthStatus._warned = Date.now();
+      toast("Auth status unavailable: " + (e.message || "bridge unreachable"), true);
+    }
+  }
+}
+
 function initSettings() {
   const urlEl = $("#set-url");
   const tokenEl = $("#set-token");
@@ -873,101 +972,6 @@ function initSettings() {
     initSSE();
   });
 
-  // Auth Status & API Key Management
-  async function loadAuthStatus() {
-    try {
-      const st = await api("/api/auth/status");
-      const ocTag = $("#auth-tag-opencode");
-      if (ocTag) {
-        ocTag.textContent = st.opencode?.configured ? `configured (${st.opencode.preview})` : "not set";
-        ocTag.style.background = st.opencode?.configured ? "var(--ok)" : "var(--muted)";
-        ocTag.style.color = st.opencode?.configured ? "#04291a" : "#fff";
-      }
-      const gemTag = $("#auth-tag-gemini");
-      if (gemTag) {
-        gemTag.textContent = st.gemini?.configured ? `configured (${st.gemini.preview})` : "not set";
-        gemTag.style.background = st.gemini?.configured ? "var(--ok)" : "var(--muted)";
-        gemTag.style.color = st.gemini?.configured ? "#04291a" : "#fff";
-      }
-      const ghTag = $("#auth-tag-github");
-      if (ghTag) {
-        ghTag.textContent = st.github?.configured ? `configured (${st.github.preview})` : "not set";
-        ghTag.style.background = st.github?.configured ? "var(--ok)" : "var(--muted)";
-        ghTag.style.color = st.github?.configured ? "#04291a" : "#fff";
-      }
-      const goTag = $("#auth-tag-opencodego");
-      if (goTag) {
-        goTag.textContent = st["opencode-go"]?.configured ? `configured (${st["opencode-go"].preview})` : "not set";
-        goTag.style.background = st["opencode-go"]?.configured ? "var(--ok)" : "var(--muted)";
-        goTag.style.color = st["opencode-go"]?.configured ? "#04291a" : "#fff";
-      }
-
-      // System & Engine Status Cards
-      const daemonTag = $("#status-daemon-tag");
-      if (daemonTag) {
-        daemonTag.textContent = "● Running (:8787)";
-        daemonTag.style.background = "var(--ok)";
-        daemonTag.style.color = "#04291a";
-      }
-
-      const opencodeTag = $("#status-opencode-tag");
-      if (opencodeTag) {
-        if (st.opencode_local) {
-          opencodeTag.textContent = "● Local CLI Process";
-          opencodeTag.style.background = "var(--ok)";
-          opencodeTag.style.color = "#04291a";
-        } else {
-          opencodeTag.textContent = "● Zen Cloud Engine";
-          opencodeTag.style.background = "var(--accent)";
-          opencodeTag.style.color = "#fff";
-        }
-      }
-
-      const modelsTag = $("#status-models-tag");
-      if (modelsTag) {
-        const count = M.all?.length || 0;
-        if (count > 0) {
-          const src = M.source ? ` (${M.source})` : "";
-          modelsTag.textContent = `● ${count} Models Active${src}`;
-          modelsTag.style.background = "var(--ok)";
-          modelsTag.style.color = "#04291a";
-        } else {
-          modelsTag.textContent = "● No Models";
-          modelsTag.style.background = "var(--muted)";
-          modelsTag.style.color = "#fff";
-        }
-      }
-
-      const zenTag = $("#status-zen-tag");
-      if (zenTag) {
-        zenTag.textContent = st.opencode?.configured ? `configured (${st.opencode.preview})` : "not set";
-        zenTag.style.background = st.opencode?.configured ? "var(--ok)" : "var(--muted)";
-        zenTag.style.color = st.opencode?.configured ? "#04291a" : "#fff";
-      }
-
-      const goStatusTag = $("#status-go-tag");
-      if (goStatusTag) {
-        const cfg = st["opencode-go"]?.configured;
-        goStatusTag.textContent = cfg ? `configured (${st["opencode-go"].preview})` : "not set";
-        goStatusTag.style.background = cfg ? "var(--ok)" : "var(--muted)";
-        goStatusTag.style.color = cfg ? "#04291a" : "#fff";
-      }
-
-      if (st.git_user) {
-        if ($("#git-user-name") && st.git_user.name && !$("#git-user-name").value) {
-          $("#git-user-name").value = st.git_user.name;
-        }
-        if ($("#git-user-email") && st.git_user.email && !$("#git-user-email").value) {
-          $("#git-user-email").value = st.git_user.email;
-        }
-      }
-    } catch (e) {
-      if (!loadAuthStatus._warned || Date.now() - loadAuthStatus._warned > 15000) {
-        loadAuthStatus._warned = Date.now();
-        toast("Auth status unavailable: " + (e.message || "bridge unreachable"), true);
-      }
-    }
-  }
   // Clipboard paste helpers
   async function pasteTo(selector) {
     try {
@@ -1689,7 +1693,7 @@ $("#btn-git-remote")?.addEventListener("click", async () => {
 
 /* ---------------- models & local LAN scanner ---------------- */
 
-const M = { all: [], favorites: [] };
+const M = { all: [], favorites: [], providers: {} };
 
 // Preset definitions for quick manual addition
 const PRESETS = {
@@ -1803,64 +1807,93 @@ async function loadModels() {
     M.favorites = f.favorites || [];
     M.source = d.source || "";
     M.all = [];
-    for (const p of d.providers || [])
+    M.providers = {};
+    for (const p of d.providers || []) {
+      M.providers[p.id] = { name: p.name || p.id, source: p.source || "" };
       for (const mid of Object.keys(p.models || {}))
         M.all.push({ p: p.id, m: mid, name: p.models[mid]?.name || mid, src: p.source || "" });
+    }
     renderModels();
   } catch (e) { ul.innerHTML = ""; toast(e.message, true); }
 }
 
+/* Models are grouped by provider (= subscription: OpenCode Zen, OpenCode
+   Go, …) with favorites pulled out into their own section on top. */
 function renderModels() {
   const q = $("#model-search").value.trim().toLowerCase();
   const favKeys = new Set(M.favorites);
-  let items = M.all.filter((x) =>
+  const items = M.all.filter((x) =>
     !q || x.name.toLowerCase().includes(q) || x.p.toLowerCase().includes(q) ||
     x.m.toLowerCase().includes(q));
-  // favorites first
-  items.sort((a, b) =>
-    (favKeys.has(`${b.p}/${b.m}`) - favKeys.has(`${a.p}/${a.m}`)));
 
   const ul = $("#model-list");
   ul.innerHTML = "";
-  if (!items.length)
+  if (!items.length) {
     ul.innerHTML = `<li>${q ? "No models match your filter." : "No models yet — add one above."}</li>`;
-
-  for (const x of items) {
-    const key = `${x.p}/${x.m}`;
-    const isFav = favKeys.has(key);
-    const isDef = S.model && S.model.providerID === x.p && S.model.modelID === x.m;
-    const li = document.createElement("li");
-    const liveTag = x.src === "engine"
-      ? ' <span style="color:var(--ok);font-size:10px">● live</span>' : "";
-    li.innerHTML = `<div class="model-item"><strong>${esc(x.name)}${isFav ? '<span class="fav-tag">★</span>' : ""}</strong>
-        <small>${esc(x.p)}${liveTag}</small></div>
-      <div class="git-btns">
-        ${isDef ? '<span class="badge-default">active</span>' : ""}
-        <button class="fav-star ${isFav ? "on" : ""}" title="favorite">${isFav ? "★" : "☆"}</button>
-        <button class="ghost accent-sel">use</button>
-        <button class="ghost rm">✕</button>
-      </div>`;
-    li.querySelector(".accent-sel").onclick = () => {
-      S.model = { providerID: x.p, modelID: x.m };
-      localStorage.setItem("of.model", JSON.stringify(S.model));
-      updateChatHeader(); renderModels();
-      toast(`Model set: ${key}`);
-    };
-    li.querySelector(".fav-star").onclick = async () => {
-      try {
-        const r = await api("/api/favorites", { method: "POST", body: { provider_id: x.p, model_id: x.m } });
-        M.favorites = r.favorites;
-        renderModels();
-      } catch (err) { toast(err.message, true); }
-    };
-    li.querySelector(".rm").onclick = async () => {
-      if (!confirm(`Remove ${x.p}/${x.m} from config?`)) return;
-      await api(`/api/models/${S.pid}`,
-        { method: "DELETE", body: { provider_id: x.p, model_id: x.m } });
-      loadModels(); toast("Model removed");
-    };
-    ul.appendChild(li);
+    return;
   }
+
+  // group key: provider id; favorites get their own group on top
+  const groups = new Map();
+  for (const x of items) {
+    const g = favKeys.has(`${x.p}/${x.m}`) ? "★ Favorites" : x.p;
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(x);
+  }
+  // keep provider payload order, favorites always first
+  const order = [...groups.keys()].sort((a, b) =>
+    (a === "★ Favorites" ? -1 : b === "★ Favorites" ? 1 : 0));
+
+  for (const g of order) {
+    const list = groups.get(g);
+    const head = document.createElement("li");
+    head.className = "model-group-head";
+    const meta = g === "★ Favorites" ? null : M.providers[g];
+    const liveTag = meta && meta.source === "engine"
+      ? ' <span class="grp-live">● live</span>' : "";
+    head.innerHTML = `<span class="grp-name">${esc(g === "★ Favorites" ? g : (meta?.name || g))}</span>${liveTag}
+      <span class="grp-count">${list.length}</span>`;
+    ul.appendChild(head);
+
+    for (const x of list) appendModelItem(ul, x, favKeys);
+  }
+}
+
+function appendModelItem(ul, x, favKeys) {
+  const key = `${x.p}/${x.m}`;
+  const isFav = favKeys.has(key);
+  const isDef = S.model && S.model.providerID === x.p && S.model.modelID === x.m;
+  const li = document.createElement("li");
+  const liveTag = x.src === "engine"
+    ? ' <span style="color:var(--ok);font-size:10px">● live</span>' : "";
+  li.innerHTML = `<div class="model-item"><strong>${esc(x.name)}${isFav ? '<span class="fav-tag">★</span>' : ""}</strong>
+      <small>${esc(x.p)}${liveTag}</small></div>
+    <div class="git-btns">
+      ${isDef ? '<span class="badge-default">active</span>' : ""}
+      <button class="fav-star ${isFav ? "on" : ""}" title="favorite">${isFav ? "★" : "☆"}</button>
+      <button class="ghost accent-sel">use</button>
+      <button class="ghost rm">✕</button>
+    </div>`;
+  li.querySelector(".accent-sel").onclick = () => {
+    S.model = { providerID: x.p, modelID: x.m };
+    localStorage.setItem("of.model", JSON.stringify(S.model));
+    updateChatHeader(); renderModels();
+    toast(`Model set: ${key}`);
+  };
+  li.querySelector(".fav-star").onclick = async () => {
+    try {
+      const r = await api("/api/favorites", { method: "POST", body: { provider_id: x.p, model_id: x.m } });
+      M.favorites = r.favorites;
+      renderModels();
+    } catch (err) { toast(err.message, true); }
+  };
+  li.querySelector(".rm").onclick = async () => {
+    if (!confirm(`Remove ${x.p}/${x.m} from config?`)) return;
+    await api(`/api/models/${S.pid}`,
+      { method: "DELETE", body: { provider_id: x.p, model_id: x.m } });
+    loadModels(); toast("Model removed");
+  };
+  ul.appendChild(li);
 }
 
 $("#model-search").addEventListener("input", renderModels);
@@ -2060,6 +2093,7 @@ $("#action-close")?.addEventListener("click", () =>
   applySettings();
   initSettings();
   loadModels().catch(() => {});
+  loadAuthStatus();
   await loadProjects();
   if (S.pid) { ensureSession(); }
   else pushMsg("system", "Welcome to OpenForge 👋\nGo to **Projects** to create your first project.");

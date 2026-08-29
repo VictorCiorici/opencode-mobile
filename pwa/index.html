@@ -192,139 +192,149 @@
 
   <!-- SETTINGS -->
   <section id="view-settings" class="view">
-    <h3 class="sect">System & Engine Status</h3>
-    <div class="card form-col" style="margin-bottom:14px;background:rgba(255,255,255,0.03)">
-      <div class="card-row" style="margin-bottom:6px">
-        <span style="font-size:13px">⚡ Native Standalone Daemon</span>
-        <span id="status-daemon-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Running (:8787)</span>
+    <details class="fold" open>
+      <summary>⚡ Engine Status<span id="status-models-tag" class="server-badge" style="background:var(--ok);color:#04291a">● 90+ Models Loaded</span></summary>
+      <div class="fold-body">
+        <div class="card form-col" style="margin-bottom:0;background:rgba(255,255,255,0.03)">
+          <div class="card-row" style="margin-bottom:6px">
+            <span style="font-size:13px">Daemon</span>
+            <span id="status-daemon-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Running (:8787)</span>
+          </div>
+          <div class="card-row" style="margin-bottom:0">
+            <span style="font-size:13px">Engine</span>
+            <span id="status-opencode-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Cloud Zen Engine</span>
+          </div>
+        </div>
       </div>
-      <div class="card-row" style="margin-bottom:6px">
-        <span style="font-size:13px">🤖 OpenCode Core Mode</span>
-        <span id="status-opencode-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Cloud Zen Engine</span>
-      </div>
-      <div class="card-row" style="margin-bottom:6px">
-        <span style="font-size:13px">🧠 AI Model Directory</span>
-        <span id="status-models-tag" class="server-badge" style="background:var(--ok);color:#04291a">● 90+ Models Loaded</span>
-      </div>
-      <div class="card-row" style="margin-bottom:6px">
-        <span style="font-size:13px">🔑 OpenCode Zen Token</span>
-        <span id="status-zen-tag" class="server-badge" style="background:var(--muted)">not set</span>
-      </div>
-      <div class="card-row" style="margin-bottom:0">
-        <span style="font-size:13px">🎫 OpenCode Go Subscription</span>
-        <span id="status-go-tag" class="server-badge" style="background:var(--muted)">not set</span>
-      </div>
-    </div>
+    </details>
 
-    <h3 class="sect">AI Credentials & API Keys</h3>
-    <div class="card form-col" style="margin-bottom:12px">
-      <div class="card-row" style="margin-bottom:6px">
-        <label style="font-weight:600;font-size:13px">OpenCode Zen Token</label>
-        <span id="auth-tag-opencode" class="server-badge" style="background:var(--muted)">not set</span>
+    <details class="fold">
+      <summary>🔑 AI Credentials
+        <span id="status-zen-tag" class="server-badge" style="background:var(--muted)">Zen not set</span>
+        <span id="status-go-tag" class="server-badge" style="background:var(--muted)">Go not set</span>
+      </summary>
+      <div class="fold-body">
+        <div class="card form-col" style="margin-bottom:10px">
+          <div class="card-row" style="margin-bottom:6px">
+            <label style="font-weight:600;font-size:13px">OpenCode Zen Token</label>
+            <span id="auth-tag-opencode" class="server-badge" style="background:var(--muted)">not set</span>
+          </div>
+          <div class="card-row" style="margin-bottom:0">
+            <input id="key-opencode" type="password" placeholder="zen_live_... (paste token)">
+            <button id="btn-paste-opencode" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
+            <button id="btn-save-opencode-key" class="primary" style="white-space:nowrap">Save</button>
+          </div>
+        </div>
+        <div class="card form-col" style="margin-bottom:10px">
+          <div class="card-row" style="margin-bottom:6px">
+            <label style="font-weight:600;font-size:13px">OpenCode Go Subscription</label>
+            <span id="auth-tag-opencodego" class="server-badge" style="background:var(--muted)">not set</span>
+          </div>
+          <div class="card-row" style="margin-bottom:0">
+            <input id="key-opencodego" type="password" placeholder="OpenCode Go API key (zen/go subscription)">
+            <button id="btn-paste-opencodego" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
+            <button id="btn-save-opencodego-key" class="primary" style="white-space:nowrap">Save</button>
+          </div>
+        </div>
+        <div class="card form-col" style="margin-bottom:10px">
+          <div class="card-row" style="margin-bottom:6px">
+            <label style="font-weight:600;font-size:13px">Google Gemini / Antigravity</label>
+            <span id="auth-tag-gemini" class="server-badge" style="background:var(--muted)">not set</span>
+          </div>
+          <div class="card-row" style="margin-bottom:0">
+            <input id="key-gemini" type="password" placeholder="AIzaSy... (Gemini key)">
+            <button id="btn-paste-gemini" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
+            <button id="btn-save-gemini-key" class="ghost" style="white-space:nowrap">Save</button>
+          </div>
+        </div>
+        <div class="card form-col" style="margin-bottom:0">
+          <div class="card-row" style="margin-bottom:6px">
+            <label style="font-weight:600;font-size:13px">Other Provider Keys (BYOK)</label>
+          </div>
+          <div class="card-row" style="margin-bottom:0">
+            <select id="key-provider-select" style="max-width:100px">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="qwen">Qwen</option>
+              <option value="glm">GLM</option>
+            </select>
+            <input id="key-provider-val" type="password" placeholder="API Key">
+            <button id="btn-paste-custom" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
+            <button id="btn-save-custom-key" class="ghost" style="white-space:nowrap">Save</button>
+          </div>
+        </div>
       </div>
-      <div class="card-row" style="margin-bottom:10px">
-        <input id="key-opencode" type="password" placeholder="zen_live_... (paste token)">
-        <button id="btn-paste-opencode" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-        <button id="btn-save-opencode-key" class="primary" style="white-space:nowrap">Save</button>
-      </div>
+    </details>
 
-      <div class="card-row" style="margin-bottom:6px">
-        <label style="font-weight:600;font-size:13px">OpenCode Go Subscription</label>
-        <span id="auth-tag-opencodego" class="server-badge" style="background:var(--muted)">not set</span>
+    <details class="fold">
+      <summary>🐙 Git & GitHub<span id="auth-tag-github" class="server-badge" style="background:var(--muted)">not set</span></summary>
+      <div class="fold-body">
+        <div class="card form-col" style="margin-bottom:10px">
+          <div class="card-row" style="margin-bottom:6px">
+            <label style="font-weight:600;font-size:13px">GitHub Personal Access Token (PAT)</label>
+          </div>
+          <div class="card-row" style="margin-bottom:0">
+            <input id="key-github" type="password" placeholder="ghp_... or github_pat_...">
+            <button id="btn-paste-github" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
+            <button id="btn-save-github-token" class="primary" style="white-space:nowrap">Save</button>
+          </div>
+        </div>
+        <div class="card form-col" style="margin-bottom:0">
+          <div class="card-row" style="margin-bottom:6px">
+            <input id="git-user-name" placeholder="Git author name (e.g. Victor Ciorici)">
+          </div>
+          <div class="card-row" style="margin-bottom:10px">
+            <input id="git-user-email" placeholder="Git author email (e.g. user@example.com)">
+          </div>
+          <button id="btn-save-git-identity" class="ghost full">Save Git Author Details</button>
+          <small style="color:var(--muted);margin-top:4px">Used for commit signatures and HTTPS credentials for private repositories.</small>
+        </div>
       </div>
-      <div class="card-row" style="margin-bottom:10px">
-        <input id="key-opencodego" type="password" placeholder="OpenCode Go API key (zen/go subscription)">
-        <button id="btn-paste-opencodego" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-        <button id="btn-save-opencodego-key" class="primary" style="white-space:nowrap">Save</button>
-      </div>
+    </details>
 
-      <div class="card-row" style="margin-bottom:6px">
-        <label style="font-weight:600;font-size:13px">Google Gemini / Antigravity</label>
-        <span id="auth-tag-gemini" class="server-badge" style="background:var(--muted)">not set</span>
+    <details class="fold">
+      <summary>🔌 Connection & Workspace</summary>
+      <div class="fold-body">
+        <div class="card form-col" style="margin-bottom:10px">
+          <div class="card-row" style="margin-bottom:0">
+            <input id="set-workspace-dir" placeholder="/sdcard/OpenForge/projects">
+            <button id="btn-save-workspace" class="ghost" style="white-space:nowrap">Save</button>
+          </div>
+          <small style="color:var(--muted);margin-top:4px">Parent folder where new projects are created automatically with Git.</small>
+        </div>
+        <div class="card form-col" style="margin-bottom:0">
+          <div id="conn-profiles" class="branch-chips" style="margin-bottom:8px"></div>
+          <div class="card-row" style="margin-bottom:8px">
+            <input id="set-url" placeholder="http://127.0.0.1:8787 (leave empty for local)">
+            <button id="btn-save-profile" class="ghost">Save</button>
+          </div>
+          <div class="card-row" style="margin-bottom:0">
+            <input id="set-token" type="password" placeholder="Bridge auth token (optional)">
+            <button id="btn-save-token" class="ghost" style="white-space:nowrap">Save</button>
+          </div>
+          <small style="color:var(--muted);margin-top:4px">Connect to a local bridge or remote server over SSH tunnel/Tailscale. If the daemon requires a bearer token (Android app sets it automatically), save it here.</small>
+        </div>
       </div>
-      <div class="card-row" style="margin-bottom:10px">
-        <input id="key-gemini" type="password" placeholder="AIzaSy... (Gemini key)">
-        <button id="btn-paste-gemini" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-        <button id="btn-save-gemini-key" class="ghost" style="white-space:nowrap">Save</button>
-      </div>
+    </details>
 
-      <div class="card-row" style="margin-bottom:6px">
-        <label style="font-weight:600;font-size:13px">Other Provider Keys (BYOK)</label>
+    <details class="fold">
+      <summary>🎛️ Preferences</summary>
+      <div class="fold-body">
+        <div class="card form-col" style="margin-bottom:10px">
+          <label class="check"><input type="checkbox" id="set-reasoning"> Auto-expand reasoning blocks</label>
+          <label class="check"><input type="checkbox" id="set-meta"> Show token usage under messages</label>
+          <label class="check"><input type="checkbox" id="set-live-ctx"> Live context updates while generating</label>
+        </div>
+        <button id="btn-clear-prefs" class="ghost full">Clear saved preferences</button>
       </div>
-      <div class="card-row" style="margin-bottom:0">
-        <select id="key-provider-select" style="max-width:100px">
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="qwen">Qwen</option>
-          <option value="glm">GLM</option>
-        </select>
-        <input id="key-provider-val" type="password" placeholder="API Key">
-        <button id="btn-paste-custom" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-        <button id="btn-save-custom-key" class="ghost" style="white-space:nowrap">Save</button>
-      </div>
-    </div>
+    </details>
 
-    <h3 class="sect">GitHub & Git Identity</h3>
-    <div class="card form-col" style="margin-bottom:12px">
-      <div class="card-row" style="margin-bottom:6px">
-        <label style="font-weight:600;font-size:13px">GitHub Personal Access Token (PAT)</label>
-        <span id="auth-tag-github" class="server-badge" style="background:var(--muted)">not set</span>
+    <details class="fold">
+      <summary>ℹ️ About</summary>
+      <div class="fold-body">
+        <div id="about-box" class="card about" style="margin-bottom:0"></div>
       </div>
-      <div class="card-row" style="margin-bottom:10px">
-        <input id="key-github" type="password" placeholder="ghp_... or github_pat_...">
-        <button id="btn-paste-github" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-        <button id="btn-save-github-token" class="primary" style="white-space:nowrap">Save</button>
-      </div>
-
-      <div class="card-row" style="margin-bottom:6px">
-        <label style="font-weight:600;font-size:13px">Git Author Name</label>
-      </div>
-      <div class="card-row" style="margin-bottom:10px">
-        <input id="git-user-name" placeholder="e.g. Victor Ciorici">
-      </div>
-
-      <div class="card-row" style="margin-bottom:6px">
-        <label style="font-weight:600;font-size:13px">Git Author Email</label>
-      </div>
-      <div class="card-row" style="margin-bottom:10px">
-        <input id="git-user-email" placeholder="e.g. user@example.com">
-      </div>
-
-      <button id="btn-save-git-identity" class="ghost full">Save Git Author Details</button>
-      <small style="color:var(--muted);margin-top:4px">Used for Git commit signatures and HTTPS credentials for private repositories.</small>
-    </div>
-
-    <h3 class="sect">Default Workspace Directory</h3>
-    <div class="card form-col" style="margin-bottom:12px">
-      <div class="card-row" style="margin-bottom:6px">
-        <input id="set-workspace-dir" placeholder="/sdcard/OpenForge/projects">
-        <button id="btn-save-workspace" class="ghost" style="white-space:nowrap">Save</button>
-      </div>
-      <small style="color:var(--muted)">Parent folder where new projects are created automatically with Git.</small>
-    </div>
-
-    <h3 class="sect">Connection & Profiles</h3>
-    <div class="card form-col">
-      <div id="conn-profiles" class="branch-chips" style="margin-bottom:8px"></div>
-      <div class="card-row" style="margin-bottom:8px">
-        <input id="set-url" placeholder="http://127.0.0.1:8787 (leave empty for local)">
-        <button id="btn-save-profile" class="ghost">Save</button>
-      </div>
-      <div class="card-row" style="margin-bottom:0">
-        <input id="set-token" type="password" placeholder="Bridge auth token (optional)">
-        <button id="btn-save-token" class="ghost" style="white-space:nowrap">Save</button>
-      </div>
-      <small style="color:var(--muted)">Connect to a local bridge or remote server over SSH tunnel/Tailscale. If the daemon requires a bearer token (Android app sets it automatically), save it here.</small>
-    </div>
-    <h3 class="sect">Preferences</h3>
-    <div class="card form-col">
-      <label class="check"><input type="checkbox" id="set-reasoning"> Auto-expand reasoning blocks</label>
-      <label class="check"><input type="checkbox" id="set-meta"> Show token usage under messages</label>
-      <label class="check"><input type="checkbox" id="set-live-ctx"> Live context updates while generating</label>
-    </div>
-    <button id="btn-clear-prefs" class="ghost full">Clear saved preferences</button>
-    <h3 class="sect">About</h3>
-    <div id="about-box" class="card about"></div>
+    </details>
   </section>
 
 </main>

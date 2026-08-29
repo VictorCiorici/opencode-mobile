@@ -222,7 +222,45 @@ body.hide-meta .msg-meta { display: none; }
   overflow: auto; white-space: pre; flex: 1; margin: 0; color: #c9d4ea;
 }
 
+/* ---------- settings foldouts ---------- */
+#view-settings .fold {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; margin-bottom: 10px; overflow: hidden;
+  /* .view.active is display:flex/column — without this, folds are flex
+     items that shrink (content clipped) when several are open. */
+  flex: 0 0 auto;
+}
+#view-settings .fold summary {
+  list-style: none; cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 13px 14px; font-weight: 700; font-size: 14px;
+}
+#view-settings .fold summary::-webkit-details-marker { display: none; }
+#view-settings .fold summary::after {
+  content: "▸"; margin-left: auto; color: var(--muted);
+  transition: transform .15s ease; font-size: 13px;
+}
+#view-settings .fold[open] summary::after { transform: rotate(90deg); }
+#view-settings .fold summary .server-badge {
+  margin-left: auto; min-width: 0;
+  max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#view-settings .fold summary .server-badge + .server-badge { margin-left: 0; }
+#view-settings .fold-body { padding: 2px 12px 12px; }
+
 /* ---------- models / files / lan scanner ---------- */
+.model-group-head {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 7px 12px; margin: 8px 0 2px;
+  position: sticky; top: 0; z-index: 1;
+}
+.model-group-head .grp-name { font-weight: 700; font-size: 13px; }
+.model-group-head .grp-live { color: var(--ok); font-size: 10px; }
+.model-group-head .grp-count {
+  margin-left: auto; background: var(--accent); color: #fff;
+  font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px;
+}
 .model-item small { color: var(--muted); display: block; }
 .badge-default { background: var(--ok); color: #04291a; border-radius: 999px;
   font-size: 11px; padding: 2px 8px; font-weight: 700; }
