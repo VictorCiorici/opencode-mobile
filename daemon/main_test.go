@@ -431,18 +431,26 @@ func TestAuthMiddlewareTokenEnforcement(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", handleHealth)
 	mux.HandleFunc("/projects", handleProjects)
+	mux.HandleFunc("/api/secret", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
 	handler := corsMiddleware(authMiddleware(mux))
 
 	if w := do(handler, "GET", "/api/health", "", nil); w.Code != 200 {
 		t.Fatal("health should stay open")
 	}
-	if w := do(handler, "GET", "/projects", "", nil); w.Code != 401 {
-		t.Fatalf("expected 401, got %d", w.Code)
+	// Intended-public endpoints must NOT require a token.
+	if w := do(handler, "GET", "/projects", "", nil); w.Code != 200 {
+		t.Fatalf("public /projects should be open, got %d", w.Code)
 	}
-	if w := do(handler, "GET", "/projects", "", map[string]string{"Authorization": "Bearer secret123"}); w.Code != 200 {
-		t.Fatalf("token rejected: %d", w.Code)
+	// A path under an API prefix is protected and must reject requests without a token.
+	if w := do(handler, "GET", "/api/secret", "", nil); w.Code != 401 {
+		t.Fatalf("expected 401 for protected path, got %d", w.Code)
 	}
-	if w := do(handler, "GET", "/projects?token=secret123", "", nil); w.Code != 200 {
+	if w := do(handler, "GET", "/api/secret", "", map[string]string{"Authorization": "Bearer secret123"}); w.Code != 200 {
+		t.Fatalf("header token rejected: %d", w.Code)
+	}
+	if w := do(handler, "GET", "/api/secret?token=secret123", "", nil); w.Code != 200 {
 		t.Fatal("query token rejected")
 	}
 }
