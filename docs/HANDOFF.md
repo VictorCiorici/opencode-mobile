@@ -44,6 +44,31 @@ Verified end-to-end on-device (Fold5, daemon-spawned engine):
 `source:"engine"` with `opencode` (60 models) **and** `opencode-go`
 (24 models).
 
+## Problem 6b — engine could not reach the network (DNS) — **FIXED**
+
+With credentials fixed, the first real chat attempt failed:
+`APIError: Cannot connect to API … https://opencode.ai/zen/v1/chat/completions`.
+
+**Root cause:** the engine is a musl binary. musl (and the c-ares resolver
+inside Bun) read `/etc/resolv.conf`, which **does not exist on Android**
+(bionic resolves via netd instead) — every hostname lookup fails, defaulting
+to `127.0.0.1:53` where nothing listens. The device itself was fine
+(`curl` from the app uid connected in 0.7 s). Binding a DNS resolver at
+`127.0.0.1:53` is not possible for an app uid (privileged port), and musl
+hardcodes the resolv.conf path (no env override, LD_PRELOAD can't intercept
+libc-internal opens).
+
+**Fix (`daemon/dnsproxy.go`):** the daemon runs a local HTTP CONNECT proxy
+(`127.0.0.1:8791`, flag `-dnsproxy-port`, `0` disables) that resolves
+hostnames itself via plain **UDP queries to a nameserver by IP**
+(`getprop net.dns1/2`, fallback `8.8.8.8`) — no resolv.conf, no privileged
+port, no proot. `engineCommand` gives the engine
+`HTTP_PROXY/HTTPS_PROXY/NO_PROXY=127.0.0.1,localhost,::1`; Bun's fetch
+honors proxy env vars.
+
+Verified on-device: `opencode/hy3-free` → "PONG", `opencode-go/glm-5.3-flash`
+→ "GO-PONG" (full round-trip through the proxy). versionCode 7 / 0.5.2.
+
 Symptoms reported on-device (v0.5.0, musl runtime build):
 
 1. Setting a Zen or Go key in Settings → after app relaunch the key shows

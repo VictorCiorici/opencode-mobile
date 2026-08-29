@@ -39,6 +39,7 @@ type Config struct {
 	Token        string
 	Version      string
 	OpenCodeBin  string
+	DNSProxyPort int
 }
 
 var (
@@ -69,10 +70,15 @@ func main() {
 	flag.StringVar(&cfg.Token, "token", os.Getenv("OCMB_TOKEN"), "Require bearer token for API access (empty disables auth)")
 	flag.StringVar(&cfg.Version, "version", daemonVersion, "Daemon version reported via /api/health")
 	flag.StringVar(&cfg.OpenCodeBin, "opencode", os.Getenv("OCMB_OPENCODE_BIN"), "Path to the bundled opencode engine binary")
+	flag.IntVar(&cfg.DNSProxyPort, "dnsproxy-port", 8791, "Port for the local CONNECT proxy that gives the musl engine working DNS (0 disables)")
 	flag.Parse()
 
 	os.MkdirAll(cfg.WorkspaceDir, 0755)
 	os.MkdirAll(cfg.DataDir, 0755)
+
+	if cfg.DNSProxyPort > 0 {
+		startDNSProxy(cfg.DNSProxyPort)
+	}
 
 	instMgr = NewManager()
 	go instMgr.reapLoop()
@@ -394,6 +400,12 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 		"HOME="+filesDir,
 		"XDG_CACHE_HOME="+tmpDir,
 	)
+	// musl cannot resolve DNS on Android (no /etc/resolv.conf); route the
+	// engine's fetches through the daemon's local CONNECT proxy, which
+	// resolves via UDP to a nameserver by IP.
+	if env := engineProxyEnv(); env != nil {
+		baseEnv = append(baseEnv, env...)
+	}
 
 	// Preferred: musl runtime. Android's app seccomp policy kills syscalls
 	// glibc makes at startup (set_robust_list=99 on arm64 is unconditionally
