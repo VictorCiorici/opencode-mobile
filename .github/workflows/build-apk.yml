@@ -101,11 +101,13 @@ jobs:
                   # ../../lib/libssl.so.3) whose targets are only valid in the
                   # full /usr/lib tree; copy the resolved real file instead.
                   real=$(readlink -f "$f")
-                  [ -f "$real" ] && cp "$real" "/tmp/rt/bin/$b"
+                  if [ -f "$real" ]; then cp "$real" "/tmp/rt/bin/$b"; fi
                 else
                   cp "$f" "/tmp/rt/bin/$b"
                   son=$(readelf -d "$f" 2>/dev/null | awk -F'[][]' '/SONAME/ {print $2}')
-                  [ -n "$son" ] && [ ! -e "/tmp/rt/bin/$son" ] && ln -sf "$b" "/tmp/rt/bin/$son"
+                  if [ -n "$son" ] && [ ! -e "/tmp/rt/bin/$son" ]; then
+                    ln -sf "$b" "/tmp/rt/bin/$son"
+                  fi
                 fi
               done
             done
