@@ -158,9 +158,13 @@ jobs:
           cp -r pwa/* android/app/src/main/assets/web/
 
       - name: Build debug APK
+        env:
+          # The bundled git + musl libs make the assets zip much larger, so
+          # give Gradle enough heap or compressDebugAssets OOMs.
+          GRADLE_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=512m"
         run: |
           cd android
-          gradle assembleDebug --stacktrace
+          gradle assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
