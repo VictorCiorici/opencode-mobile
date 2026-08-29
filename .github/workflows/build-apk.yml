@@ -57,12 +57,20 @@ jobs:
           # musl loader + C++ runtime from Alpine (all land in bin/ next to
           # the engine; the daemon invokes ld-musl with --library-path bin).
           ALPINE=https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64
-          fetch() { # fetch <apk-name> <file...>
+          fetch() { # fetch <apk-name> <soname...>
             local apk="$1"; shift
             curl -fsSL "$ALPINE/$apk" -o /tmp/pkg.apk
             rm -rf /tmp/pkgx && mkdir -p /tmp/pkgx && tar -xzf /tmp/pkg.apk -C /tmp/pkgx
             for f in "$@"; do
-              find /tmp/pkgx -type f -name "$f" -exec cp {} /tmp/rt/bin/ \;
+              # Alpine ships versioned .so files (e.g. libstdc++.so.6.0.32)
+              # plus a SONAME symlink; find the real file and copy it under
+              # the SONAME (libstdc++.so.6) the musl loader actually resolves.
+              src=$(find /tmp/pkgx -type f -name "${f}*" | head -1)
+              if [ -n "$src" ]; then
+                cp "$src" "/tmp/rt/bin/$f"
+              else
+                echo "WARN: $f not found in $apk"
+              fi
             done
           }
           fetch musl-1.2.4_git20230717-r6.apk ld-musl-aarch64.so.1
