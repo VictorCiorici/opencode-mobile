@@ -80,6 +80,11 @@ func main() {
 		startDNSProxy(cfg.DNSProxyPort)
 	}
 
+	// Allow git to operate on repos owned by other uids (e.g. folders touched
+	// by Termux/another app); otherwise every external project shows up as
+	// "not a git repository" due to the safe.directory ownership check.
+	configureGitSafeDir()
+
 	instMgr = NewManager()
 	go instMgr.reapLoop()
 
@@ -1031,6 +1036,15 @@ func handleBrowse(w http.ResponseWriter, r *http.Request) {
 }
 
 // ------------------------------------------------------------------- Git ---
+
+// configureGitSafeDir lets the daemon operate on repositories owned by other
+// uids (e.g. folders cloned or edited via Termux / another app). Git's
+// safe.directory check otherwise rejects them with "dubious ownership", which
+// would make every externally-owned project appear as "not a git repository".
+// On a single-user mobile app this global opt-out is safe and expected.
+func configureGitSafeDir() {
+	exec.Command("git", "config", "--global", "safe.directory", "*").Run()
+}
 
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
