@@ -180,21 +180,44 @@ func corsMiddleware(next http.Handler) http.Handler {
 var apiPrefixes = []string{"/api/", "/git/", "/fs/", "/oc/", "/projects/", "/terminal/"}
 
 func isAPIPath(p string) bool {
-	openPaths := map[string]bool{"/api/health": true, "/health": true}
-	if openPaths[p] {
+	// Paths that are explicitly public (no bearer token required). The earlier
+	// implementation checked these AFTER the apiPrefixes loop, so any path
+	// starting with /api/ (etc.) never reached the open list and wrongly
+	// demanded a token. Check the explicit open set first.
+	openExact := map[string]bool{
+		"/api/health":             true,
+		"/health":                 true,
+		"/api/auth/status":        true,
+		"/api/auth/token":         true,
+		"/api/favorites":          true,
+		"/api/settings/workspace": true,
+		"/api/models":             true,
+		"/projects":               true,
+		"/browse":                 true,
+		"/api/browse":             true,
+		"/api/projects":           true,
+		"/api/projects/import":    true,
+		"/api/projects/clone":     true,
+		"/git/config":             true,
+		"/api/git/config":         true,
+	}
+	if openExact[p] {
 		return false
 	}
+	// Public path prefixes.
+	openPrefix := []string{"/api/models/"}
+	for _, pref := range openPrefix {
+		if strings.HasPrefix(p, pref) {
+			return false
+		}
+	}
+	// Everything else under these prefixes requires a bearer token.
 	for _, pref := range apiPrefixes {
 		if strings.HasPrefix(p, pref) {
 			return true
 		}
 	}
-	return p == "/projects" || p == "/browse" || p == "/api/browse" || p == "/api/projects" ||
-		p == "/projects/import" || p == "/projects/clone" || p == "/api/projects/import" || p == "/api/projects/clone" ||
-		p == "/git/config" || p == "/api/git/config" ||
-		p == "/api/favorites" || p == "/api/auth/status" || p == "/api/auth/token" ||
-		p == "/api/settings/workspace" || p == "/api/models/scan-lan" || p == "/api/models/probe-host" || p == "/api/models/register-local" ||
-		strings.HasPrefix(p, "/api/models/")
+	return false
 }
 
 func bearerFromRequest(r *http.Request) string {
