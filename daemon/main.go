@@ -2507,6 +2507,45 @@ func saveGitHubCredentials(token string) {
 	}
 }
 
+// validateGitHubToken verifies a PAT against api.github.com. On Android the
+// daemon is a musl binary with no /etc/resolv.conf, so the request is routed
+// through the local CONNECT proxy (which resolves via UDP) when running.
+func validateGitHubToken(token string) (string, error) {
+	client := &http.Client{Timeout: 12 * time.Second}
+	if proxy.started {
+		if u, err := url.Parse("http://" + proxy.addr); err == nil {
+			client.Transport = &http.Transport{
+				Proxy: func(*http.Request) (*url.URL, error) { return u, nil },
+			}
+		}
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/user", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("github API unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("github rejected token (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var me struct {
+		Login string `json:"login"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
+		return "", fmt.Errorf("invalid github response: %w", err)
+	}
+	if me.Login == "" {
+		return "", fmt.Errorf("github token valid but returned no login")
+	}
+	return me.Login, nil
+}
+
 func gitIdentity() (string, string) {
 	nameOut, _ := exec.Command("git", "config", "--global", "user.name").Output()
 	emailOut, _ := exec.Command("git", "config", "--global", "user.email").Output()
@@ -2531,6 +2570,12 @@ func authStatusPayload() blob {
 		opencodeGoToken = os.Getenv("OPENCODE_API_KEY")
 	}
 	githubToken := getTok("github")
+	ghLogin := ""
+	if obj, ok := authData["github"].(map[string]interface{}); ok {
+		if l, ok := obj["login"].(string); ok {
+			ghLogin = l
+		}
+	}
 	name, email := gitIdentity()
 
 	secrets := blob{}
@@ -2542,7 +2587,7 @@ func authStatusPayload() blob {
 	payload := blob{
 		"opencode":       blob{"configured": opencodeToken != "", "preview": maskSecret(opencodeToken)},
 		"opencode-go":    blob{"configured": opencodeGoToken != "", "preview": maskSecret(opencodeGoToken)},
-		"github":         blob{"configured": githubToken != "", "preview": maskSecret(githubToken)},
+		"github":         blob{"configured": githubToken != "", "preview": maskSecret(githubToken), "login": ghLogin},
 		"git_user":       map[string]string{"name": name, "email": email},
 		"opencode_local": findOpenCodeBinary() != "",
 	}
@@ -2590,9 +2635,19 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		authData := readAuthJSON()
 		if tok == "" {
 			delete(authData, "github")
-		} else {
-			authData["github"] = blob{"type": "token", "token": tok}
+			if err := writeAuthJSON(authData); err != nil {
+				writeErr(w, http.StatusInternalServerError, "auth save failed: "+err.Error())
+				return
+			}
+			saveGitHubCredentials("")
+			break
 		}
+		login, verr := validateGitHubToken(tok)
+		if verr != nil {
+			writeErr(w, http.StatusBadRequest, "GitHub token invalid: "+verr.Error())
+			return
+		}
+		authData["github"] = blob{"type": "token", "token": tok, "login": login}
 		if err := writeAuthJSON(authData); err != nil {
 			writeErr(w, http.StatusInternalServerError, "auth save failed: "+err.Error())
 			return
