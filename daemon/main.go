@@ -80,6 +80,24 @@ func main() {
 		startDNSProxy(cfg.DNSProxyPort)
 	}
 
+	// Allow git to operate on repos owned by other uids (e.g. folders touched
+	// by Termux/another app); otherwise every external project shows up as
+	// "not a git repository" due to the safe.directory ownership check.
+	configureGitSafeDir()
+
+	// Point git at the CA bundle (https remotes) and git-core helpers (upload
+	// helpers / https remote transport) we ship next to the engine.
+	if b := findOpenCodeBinary(); b != "" {
+		bin := filepath.Dir(b)
+		if ca := filepath.Join(bin, "ca-certificates.crt"); statOK(ca) {
+			os.Setenv("GIT_SSL_CAINFO", ca)
+			os.Setenv("SSL_CERT_FILE", ca)
+		}
+		if gp := filepath.Join(bin, "git-core"); statOK(gp) {
+			os.Setenv("GIT_EXEC_PATH", gp)
+		}
+	}
+
 	instMgr = NewManager()
 	go instMgr.reapLoop()
 
@@ -714,8 +732,8 @@ func handleProjects(w http.ResponseWriter, r *http.Request) {
 
 		gitInit := req.GitInit == nil || *req.GitInit
 		if gitInit {
-			exec.Command("git", "init", "--initial-branch", branch, projPath).Run()
-			cmd := exec.Command("git", "commit", "--allow-empty", "-m", "initial commit")
+			gitCmd("init", "--initial-branch", branch, projPath).Run()
+			cmd := gitCmd("commit", "--allow-empty", "-m", "initial commit")
 			cmd.Dir = projPath
 			cmd.Run()
 		}
@@ -799,7 +817,7 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 	}
 	args = append(args, gitURL, destPath)
 
-	cmd := exec.Command("git", args...)
+	cmd := gitCmd(args...)
 	var errOut bytes.Buffer
 	cmd.Stderr = &errOut
 	if err := cmd.Run(); err != nil {
@@ -1032,8 +1050,23 @@ func handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 // ------------------------------------------------------------------- Git ---
 
+// configureGitSafeDir lets the daemon operate on repositories owned by other
+// uids (e.g. folders cloned or edited via Termux / another app). Git's
+// safe.directory check otherwise rejects them with "dubious ownership", which
+// would make every externally-owned project appear as "not a git repository".
+// On a single-user mobile app this global opt-out is safe and expected.
+func configureGitSafeDir() {
+	gitCmd("config", "--global", "safe.directory", "*").Run()
+}
+
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	// safe.directory=* lets git operate on repos owned by other uids (e.g.
+	// folders cloned/edited via Termux). Without it, git aborts with
+	// "dubious ownership" and the project looks like "not a git repository".
+	// Passing it per-invocation avoids any dependence on global gitconfig
+	// state (which may fail to write).
+	full := append([]string{"-c", "safe.directory=*"}, args...)
+	cmd := gitCmd(full...)
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -1050,6 +1083,37 @@ func runGitOK(dir string, args ...string) (string, error) {
 	return out, err
 }
 
+// runtimeBinDir is the directory holding the bundled engine, musl loader and
+// (now) the git binary — all siblings under the app's files/bin.
+func runtimeBinDir() string {
+	if b := findOpenCodeBinary(); b != "" {
+		return filepath.Dir(b)
+	}
+	return filepath.Dir(os.Args[0])
+}
+
+func statOK(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// gitCmd builds an *exec.Cmd for the git binary bundled next to the engine,
+// executed through the musl loader (same runtime as the engine) so it works on
+// Android where no system git exists. Falls back to a bare "git" (PATH) for
+// desktop/dev builds.
+func gitCmd(args ...string) *exec.Cmd {
+	dir := runtimeBinDir()
+	loader := filepath.Join(dir, "ld-musl-aarch64.so.1")
+	gitBin := filepath.Join(dir, "git")
+	if _, err := os.Stat(loader); err == nil {
+		if _, err := os.Stat(gitBin); err == nil {
+			full := append([]string{"--library-path", dir, gitBin}, args...)
+			return exec.Command(loader, full...)
+		}
+	}
+	return exec.Command("git", args...)
+}
+
 func isGitRepo(dir string) bool {
 	fi, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil && (fi.IsDir() || fi.Mode().Type() == 0) // dir or worktree file
@@ -1057,8 +1121,8 @@ func isGitRepo(dir string) bool {
 
 func handleGitGlobalConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		nameOut, _ := exec.Command("git", "config", "--global", "user.name").Output()
-		emailOut, _ := exec.Command("git", "config", "--global", "user.email").Output()
+		nameOut, _ := gitCmd("config", "--global", "user.name").Output()
+		emailOut, _ := gitCmd("config", "--global", "user.email").Output()
 		writeJSON(w, http.StatusOK, map[string]string{
 			"name":  strings.TrimSpace(string(nameOut)),
 			"email": strings.TrimSpace(string(emailOut)),
@@ -1072,10 +1136,10 @@ func handleGitGlobalConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		decodeBody(r, &req)
 		if req.Name != "" {
-			exec.Command("git", "config", "--global", "user.name", strings.TrimSpace(req.Name)).Run()
+			gitCmd("config", "--global", "user.name", strings.TrimSpace(req.Name)).Run()
 		}
 		if req.Email != "" {
-			exec.Command("git", "config", "--global", "user.email", strings.TrimSpace(req.Email)).Run()
+			gitCmd("config", "--global", "user.email", strings.TrimSpace(req.Email)).Run()
 		}
 		writeJSON(w, http.StatusOK, blob{"ok": true})
 		return
@@ -2500,16 +2564,55 @@ func saveGitHubCredentials(token string) {
 	os.MkdirAll(home, 0700)
 	writeFileSecret(credPath, []byte(strings.Join(kept, "\n")+"\n"))
 	if len(kept) > 0 {
-		out, _ := exec.Command("git", "config", "--global", "credential.helper").Output()
+		out, _ := gitCmd("config", "--global", "credential.helper").Output()
 		if strings.TrimSpace(string(out)) == "" {
-			exec.Command("git", "config", "--global", "credential.helper", "store").Run()
+			gitCmd("config", "--global", "credential.helper", "store").Run()
 		}
 	}
 }
 
+// validateGitHubToken verifies a PAT against api.github.com. On Android the
+// daemon is a musl binary with no /etc/resolv.conf, so the request is routed
+// through the local CONNECT proxy (which resolves via UDP) when running.
+func validateGitHubToken(token string) (string, error) {
+	client := &http.Client{Timeout: 12 * time.Second}
+	if proxy.started {
+		if u, err := url.Parse("http://" + proxy.addr); err == nil {
+			client.Transport = &http.Transport{
+				Proxy: func(*http.Request) (*url.URL, error) { return u, nil },
+			}
+		}
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/user", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("github API unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("github rejected token (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var me struct {
+		Login string `json:"login"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
+		return "", fmt.Errorf("invalid github response: %w", err)
+	}
+	if me.Login == "" {
+		return "", fmt.Errorf("github token valid but returned no login")
+	}
+	return me.Login, nil
+}
+
 func gitIdentity() (string, string) {
-	nameOut, _ := exec.Command("git", "config", "--global", "user.name").Output()
-	emailOut, _ := exec.Command("git", "config", "--global", "user.email").Output()
+	nameOut, _ := gitCmd("config", "--global", "user.name").Output()
+	emailOut, _ := gitCmd("config", "--global", "user.email").Output()
 	return strings.TrimSpace(string(nameOut)), strings.TrimSpace(string(emailOut))
 }
 
@@ -2531,6 +2634,12 @@ func authStatusPayload() blob {
 		opencodeGoToken = os.Getenv("OPENCODE_API_KEY")
 	}
 	githubToken := getTok("github")
+	ghLogin := ""
+	if obj, ok := authData["github"].(map[string]interface{}); ok {
+		if l, ok := obj["login"].(string); ok {
+			ghLogin = l
+		}
+	}
 	name, email := gitIdentity()
 
 	secrets := blob{}
@@ -2542,7 +2651,7 @@ func authStatusPayload() blob {
 	payload := blob{
 		"opencode":       blob{"configured": opencodeToken != "", "preview": maskSecret(opencodeToken)},
 		"opencode-go":    blob{"configured": opencodeGoToken != "", "preview": maskSecret(opencodeGoToken)},
-		"github":         blob{"configured": githubToken != "", "preview": maskSecret(githubToken)},
+		"github":         blob{"configured": githubToken != "", "preview": maskSecret(githubToken), "login": ghLogin},
 		"git_user":       map[string]string{"name": name, "email": email},
 		"opencode_local": findOpenCodeBinary() != "",
 	}
@@ -2590,9 +2699,19 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		authData := readAuthJSON()
 		if tok == "" {
 			delete(authData, "github")
-		} else {
-			authData["github"] = blob{"type": "token", "token": tok}
+			if err := writeAuthJSON(authData); err != nil {
+				writeErr(w, http.StatusInternalServerError, "auth save failed: "+err.Error())
+				return
+			}
+			saveGitHubCredentials("")
+			break
 		}
+		login, verr := validateGitHubToken(tok)
+		if verr != nil {
+			writeErr(w, http.StatusBadRequest, "GitHub token invalid: "+verr.Error())
+			return
+		}
+		authData["github"] = blob{"type": "token", "token": tok, "login": login}
 		if err := writeAuthJSON(authData); err != nil {
 			writeErr(w, http.StatusInternalServerError, "auth save failed: "+err.Error())
 			return
