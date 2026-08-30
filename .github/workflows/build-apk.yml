@@ -123,7 +123,7 @@ jobs:
           # wrapper scripts under git-core/ (GIT_EXEC_PATH points here). The
           # wrappers let git exec them under the loader on Android.
           mkdir -p /tmp/rt/bin/git-core-real /tmp/rt/bin/git-core
-          cp -r /tmp/gitx/usr/libexec/git-core/* /tmp/rt/bin/git-core-real/ 2>/dev/null || true
+          cp -a /tmp/gitx/usr/libexec/git-core/* /tmp/rt/bin/git-core-real/ 2>/dev/null || true
           chmod +x /tmp/rt/bin/git-core-real/* 2>/dev/null || true
           for h in /tmp/rt/bin/git-core-real/*; do
             n=$(basename "$h")
