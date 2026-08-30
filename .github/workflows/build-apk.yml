@@ -112,34 +112,18 @@ jobs:
               done
             done
           }
-          # git main binary (only needs pcre2 + zlib beyond the musl loader)
+          # git main binary — only pcre2 + zlib are needed for local ops
+          # (log/status/diff/commit). Helpers (git-remote-https etc.) are
+          # omitted: they would bloat the runtime 136× via zip dereferencing
+          # symlinks (see RuntimeInstaller.java:88 ZipInputStream) and aren't
+          # needed for viewing history. Re-add with proper dedup if push/pull
+          # is required later.
           curl -fsSL "$(apkurl git)" -o /tmp/git.apk
           rm -rf /tmp/gitx && mkdir -p /tmp/gitx && tar -xzf /tmp/git.apk -C /tmp/gitx
           cp /tmp/gitx/usr/bin/git /tmp/rt/bin/git
           chmod +x /tmp/rt/bin/git
-          # git-core helpers (git-remote-http, upload-pack, ...) — needed for
-          # https remotes and local clone/fetch/pull. They are musl binaries,
-          # so we keep the real ones under git-core-real/ and expose musl-loader
-          # wrapper scripts under git-core/ (GIT_EXEC_PATH points here). The
-          # wrappers let git exec them under the loader on Android.
-          mkdir -p /tmp/rt/bin/git-core-real /tmp/rt/bin/git-core
-          cp -a /tmp/gitx/usr/libexec/git-core/* /tmp/rt/bin/git-core-real/ 2>/dev/null || true
-          chmod +x /tmp/rt/bin/git-core-real/* 2>/dev/null || true
-          for h in /tmp/rt/bin/git-core-real/*; do
-            n=$(basename "$h")
-            # Use printf (not a heredoc) so the script has no leading whitespace
-            # before its shebang, which a YAML-indented heredoc would otherwise add.
-            printf '#!/system/bin/sh\nBIN=$(cd "$(dirname "$0")/.." && pwd)\nexec "$BIN/ld-musl-aarch64.so.1" --library-path "$BIN" "$BIN/git-core-real/%s" "$@"\n' "$n" > "/tmp/rt/bin/git-core/$n"
-            chmod +x "/tmp/rt/bin/git-core/$n"
-          done
-          # git's shared libs: main (pcre2, zlib) plus git-core helper deps.
-          # alpine splits runtime libs into *-libs/*3 packages, so we name
-          # those explicitly (libexpat, nghttp2-libs, brotli-libs, lz4-libs,
-          # libssl3, libcrypto3, libcurl, libintl) plus their transitive deps.
-          apkso zlib pcre2 libexpat nghttp2-libs brotli-libs lz4-libs libssh2 libpsl c-ares libssl3 libcrypto3 libcurl libintl libidn2 libunistring gettext
-          # zstd is used by some git operations
-          apkso zstd-libs
-          # CA bundle for https remotes
+          apkso zlib pcre2
+          # CA bundle (kept for future https support)
           curl -fsSL "$(apkurl ca-certificates)" -o /tmp/ca.apk
           rm -rf /tmp/cax && mkdir -p /tmp/cax && tar -xzf /tmp/ca.apk -C /tmp/cax
           cp /tmp/cax/etc/ssl/certs/ca-certificates.crt /tmp/rt/bin/ca-certificates.crt 2>/dev/null || true
