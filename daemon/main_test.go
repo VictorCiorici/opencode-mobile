@@ -515,31 +515,46 @@ func TestEngineCommandSetsTaskTimeout(t *testing.T) {
 func TestAgentMdGuardrails(t *testing.T) {
 	// AGENT.md must exist at repo root and contain the explore limits so the
 	// Task(subagent_type="explore") prompt doesn't hang for hours on apk/.git.
-	repoRoot := filepath.Join(filepath.Dir(mustWd(t)), "..")
-	candidates := []string{
-		filepath.Join(repoRoot, "AGENT.md"),
-		filepath.Join(filepath.Dir(repoRoot), "AGENT.md"),
-	}
 	var data []byte
 	var err error
-	for _, p := range candidates {
-		data, err = os.ReadFile(p)
-		if err == nil {
-			break
-		}
-	}
-	// Fallback: search from daemon dir up to 3 levels
-	if err != nil {
-		for _, rel := range []string{"../AGENT.md", "../../AGENT.md"} {
-			if b, e := os.ReadFile(filepath.Join(filepath.Dir(mustWd(t)), rel)); e == nil {
+	wd := mustWd(t)
+	for _, base := range []string{wd, filepath.Dir(wd), filepath.Join(wd, ".."), filepath.Join(wd, "../..")} {
+		for _, p := range []string{filepath.Join(base, "AGENT.md"), filepath.Join(base, "../AGENT.md")} {
+			if b, e := os.ReadFile(p); e == nil {
 				data = b
 				err = nil
 				break
 			}
 		}
+		if err == nil && len(data) > 0 {
+			break
+		}
+		// direct check of repo root from daemon dir
+		if b, e := os.ReadFile(filepath.Join(filepath.Dir(wd), "AGENT.md")); e == nil {
+			data = b
+			err = nil
+			break
+		}
+		if b, e := os.ReadFile(filepath.Join(wd, "../AGENT.md")); e == nil {
+			data = b
+			err = nil
+			break
+		}
 	}
-	if err != nil {
-		t.Fatalf("AGENT.md not found: %v", err)
+	if len(data) == 0 {
+		// walk up 4 levels brute force
+		dir := wd
+		for i := 0; i < 4; i++ {
+			if b, e := os.ReadFile(filepath.Join(dir, "AGENT.md")); e == nil {
+				data = b
+				err = nil
+				break
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
+	if len(data) == 0 {
+		t.Fatalf("AGENT.md not found from wd %s: %v", wd, err)
 	}
 	s := string(data)
 	for _, need := range []string{
@@ -553,16 +568,30 @@ func TestAgentMdGuardrails(t *testing.T) {
 }
 
 func TestOpenCodeIgnore(t *testing.T) {
-	repoRoot := filepath.Join(filepath.Dir(mustWd(t)), "..")
-	p := filepath.Join(repoRoot, ".opencodeignore")
-	if _, err := os.Stat(p); err != nil {
-		// try daemon-relative
-		p = filepath.Join(filepath.Dir(mustWd(t)), "../.opencodeignore")
-		if _, err2 := os.Stat(p); err2 != nil {
-			t.Fatalf(".opencodeignore not found: %v / %v", err, err2)
+	wd := mustWd(t)
+	var p string
+	var b []byte
+	found := false
+	dir := wd
+	for i := 0; i < 5; i++ {
+		cand := filepath.Join(dir, ".opencodeignore")
+		if _, err := os.Stat(cand); err == nil {
+			p = cand
+			found = true
+			break
 		}
+		cand = filepath.Join(dir, "../.opencodeignore")
+		if _, err := os.Stat(cand); err == nil {
+			p = cand
+			found = true
+			break
+		}
+		dir = filepath.Dir(dir)
 	}
-	b, _ := os.ReadFile(p)
+	if !found {
+		t.Fatalf(".opencodeignore not found from wd %s", wd)
+	}
+	b, _ = os.ReadFile(p)
 	s := string(b)
 	for _, pat := range []string{"apk/", ".git/", "node_modules/", ".gradle/"} {
 		if !strings.Contains(s, pat) {
