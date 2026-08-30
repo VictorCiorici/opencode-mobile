@@ -399,6 +399,11 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 		"TMPDIR="+tmpDir,
 		"HOME="+filesDir,
 		"XDG_CACHE_HOME="+tmpDir,
+		// Guard against unbounded explore subagents that `Glob(pattern="**/*")`
+		// from the repo root and hang for hours on Android FUSE/Scoped Storage
+		// (scans apk/, .git/, node_modules). 30s is enough for a scoped explore;
+		// the engine's Task tool should respect this via AGENT.md.
+		"OPENCODE_TASK_TIMEOUT=30000",
 	)
 	// musl cannot resolve DNS on Android (no /etc/resolv.conf); route the
 	// engine's fetches through the daemon's local CONNECT proxy, which
@@ -430,7 +435,9 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 		cmd.Env = append(baseEnv, "GLIBC_TUNABLES=glibc.pthread.rseq=0")
 		return cmd
 	}
-	return exec.Command(bin, args...)
+	cmd := exec.Command(bin, args...)
+	cmd.Env = baseEnv
+	return cmd
 }
 
 // spawnLocked starts `opencode serve` for pid rooted at dir. Callers must

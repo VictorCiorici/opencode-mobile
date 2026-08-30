@@ -490,3 +490,121 @@ func TestRegisterLocalMasksApiKeyInResponse(t *testing.T) {
 	json.Unmarshal([]byte(`{"options":{"apiKey":"supersecret"}}`), &probe)
 	t.Logf("direct deepCopyMasked: %#v", deepCopyMasked(probe))
 }
+
+func TestEngineCommandSetsTaskTimeout(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "b", "opencode")
+	_ = os.MkdirAll(filepath.Dir(bin), 0755)
+	_ = os.WriteFile(bin, []byte("#!/bin/sh\necho hi\n"), 0755)
+	cmd := engineCommand(bin, "serve", "--port", "1234")
+	found := false
+	for _, e := range cmd.Env {
+		if e == "OPENCODE_TASK_TIMEOUT=30000" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("engineCommand env missing OPENCODE_TASK_TIMEOUT=30000, got %v", cmd.Env)
+	}
+	if cmd.Dir != "" {
+		t.Fatalf("engineCommand should not set Dir, got %q", cmd.Dir)
+	}
+}
+
+func TestAgentMdGuardrails(t *testing.T) {
+	// AGENT.md must exist at repo root and contain the explore limits so the
+	// Task(subagent_type="explore") prompt doesn't hang for hours on apk/.git.
+	var data []byte
+	var err error
+	wd := mustWd(t)
+	for _, base := range []string{wd, filepath.Dir(wd), filepath.Join(wd, ".."), filepath.Join(wd, "../..")} {
+		for _, p := range []string{filepath.Join(base, "AGENT.md"), filepath.Join(base, "../AGENT.md")} {
+			if b, e := os.ReadFile(p); e == nil {
+				data = b
+				err = nil
+				break
+			}
+		}
+		if err == nil && len(data) > 0 {
+			break
+		}
+		// direct check of repo root from daemon dir
+		if b, e := os.ReadFile(filepath.Join(filepath.Dir(wd), "AGENT.md")); e == nil {
+			data = b
+			err = nil
+			break
+		}
+		if b, e := os.ReadFile(filepath.Join(wd, "../AGENT.md")); e == nil {
+			data = b
+			err = nil
+			break
+		}
+	}
+	if len(data) == 0 {
+		// walk up 4 levels brute force
+		dir := wd
+		for i := 0; i < 4; i++ {
+			if b, e := os.ReadFile(filepath.Join(dir, "AGENT.md")); e == nil {
+				data = b
+				err = nil
+				break
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
+	if len(data) == 0 {
+		t.Fatalf("AGENT.md not found from wd %s: %v", wd, err)
+	}
+	s := string(data)
+	for _, need := range []string{
+		"Glob", "subagent_type=\"explore\"", "30000", "maxFiles",
+		"apk/", ".git/", "node_modules",
+	} {
+		if !strings.Contains(s, need) {
+			t.Fatalf("AGENT.md missing guardrail %q", need)
+		}
+	}
+}
+
+func TestOpenCodeIgnore(t *testing.T) {
+	wd := mustWd(t)
+	var p string
+	var b []byte
+	found := false
+	dir := wd
+	for i := 0; i < 5; i++ {
+		cand := filepath.Join(dir, ".opencodeignore")
+		if _, err := os.Stat(cand); err == nil {
+			p = cand
+			found = true
+			break
+		}
+		cand = filepath.Join(dir, "../.opencodeignore")
+		if _, err := os.Stat(cand); err == nil {
+			p = cand
+			found = true
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	if !found {
+		t.Fatalf(".opencodeignore not found from wd %s", wd)
+	}
+	b, _ = os.ReadFile(p)
+	s := string(b)
+	for _, pat := range []string{"apk/", ".git/", "node_modules/", ".gradle/"} {
+		if !strings.Contains(s, pat) {
+			t.Fatalf(".opencodeignore missing %q", pat)
+		}
+	}
+}
+
+func mustWd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
+}
