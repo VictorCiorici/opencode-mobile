@@ -490,3 +490,92 @@ func TestRegisterLocalMasksApiKeyInResponse(t *testing.T) {
 	json.Unmarshal([]byte(`{"options":{"apiKey":"supersecret"}}`), &probe)
 	t.Logf("direct deepCopyMasked: %#v", deepCopyMasked(probe))
 }
+
+func TestEngineCommandSetsTaskTimeout(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "b", "opencode")
+	_ = os.MkdirAll(filepath.Dir(bin), 0755)
+	_ = os.WriteFile(bin, []byte("#!/bin/sh\necho hi\n"), 0755)
+	cmd := engineCommand(bin, "serve", "--port", "1234")
+	found := false
+	for _, e := range cmd.Env {
+		if e == "OPENCODE_TASK_TIMEOUT=30000" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("engineCommand env missing OPENCODE_TASK_TIMEOUT=30000, got %v", cmd.Env)
+	}
+	if cmd.Dir != "" {
+		t.Fatalf("engineCommand should not set Dir, got %q", cmd.Dir)
+	}
+}
+
+func TestAgentMdGuardrails(t *testing.T) {
+	// AGENT.md must exist at repo root and contain the explore limits so the
+	// Task(subagent_type="explore") prompt doesn't hang for hours on apk/.git.
+	repoRoot := filepath.Join(filepath.Dir(mustWd(t)), "..")
+	candidates := []string{
+		filepath.Join(repoRoot, "AGENT.md"),
+		filepath.Join(filepath.Dir(repoRoot), "AGENT.md"),
+	}
+	var data []byte
+	var err error
+	for _, p := range candidates {
+		data, err = os.ReadFile(p)
+		if err == nil {
+			break
+		}
+	}
+	// Fallback: search from daemon dir up to 3 levels
+	if err != nil {
+		for _, rel := range []string{"../AGENT.md", "../../AGENT.md"} {
+			if b, e := os.ReadFile(filepath.Join(filepath.Dir(mustWd(t)), rel)); e == nil {
+				data = b
+				err = nil
+				break
+			}
+		}
+	}
+	if err != nil {
+		t.Fatalf("AGENT.md not found: %v", err)
+	}
+	s := string(data)
+	for _, need := range []string{
+		"Glob", "subagent_type=\"explore\"", "30000", "maxFiles",
+		"apk/", ".git/", "node_modules",
+	} {
+		if !strings.Contains(s, need) {
+			t.Fatalf("AGENT.md missing guardrail %q", need)
+		}
+	}
+}
+
+func TestOpenCodeIgnore(t *testing.T) {
+	repoRoot := filepath.Join(filepath.Dir(mustWd(t)), "..")
+	p := filepath.Join(repoRoot, ".opencodeignore")
+	if _, err := os.Stat(p); err != nil {
+		// try daemon-relative
+		p = filepath.Join(filepath.Dir(mustWd(t)), "../.opencodeignore")
+		if _, err2 := os.Stat(p); err2 != nil {
+			t.Fatalf(".opencodeignore not found: %v / %v", err, err2)
+		}
+	}
+	b, _ := os.ReadFile(p)
+	s := string(b)
+	for _, pat := range []string{"apk/", ".git/", "node_modules/", ".gradle/"} {
+		if !strings.Contains(s, pat) {
+			t.Fatalf(".opencodeignore missing %q", pat)
+		}
+	}
+}
+
+func mustWd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
+}

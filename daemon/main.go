@@ -435,7 +435,9 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 		cmd.Env = append(baseEnv, "GLIBC_TUNABLES=glibc.pthread.rseq=0")
 		return cmd
 	}
-	return exec.Command(bin, args...)
+	cmd := exec.Command(bin, args...)
+	cmd.Env = baseEnv
+	return cmd
 }
 
 // spawnLocked starts `opencode serve` for pid rooted at dir. Callers must
