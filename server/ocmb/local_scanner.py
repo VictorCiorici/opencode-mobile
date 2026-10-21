@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import itertools
 import json
 import os
 import socket
@@ -119,7 +120,7 @@ async def scan_local_network(custom_subnet: str | None = None, include_lan: bool
         for sub in subnets:
             try:
                 net = ipaddress.ip_network(sub, strict=False)
-                for ip in list(net.hosts())[:64]:
+                for ip in itertools.islice(net.hosts(), 64):
                     hosts_to_scan.append(str(ip))
             except Exception:
                 pass
@@ -143,54 +144,54 @@ async def scan_local_network(custom_subnet: str | None = None, include_lan: bool
     return found
 
 
-def register_local_provider(provider_id: str, name: str, base_url: str, models: list[dict[str, Any]], api_key: str = "") -> dict:
+def register_local_provider(provider_id: str, name: str, base_url: str, models: list[Any], api_key: str = "") -> dict:
     """Save a local/LAN provider into ~/.config/opencode/opencode.json.
 
     The returned config is sanitized: API keys are masked so secrets never
     round-trip over the HTTP response (the on-disk config keeps the real key).
+    Mirrors the Go daemon: an empty key is stored as the placeholder "local".
     """
-    from .models_cfg import _config_paths, _read, _write
+    from .models_cfg import _config_paths, _read, _write, redact
 
     path = _config_paths(None)[-1]
     cfg = _read(path)
-    prov = cfg.setdefault("provider", {}).setdefault(provider_id, {})
+    provs = cfg.get("provider")
+    if not isinstance(provs, dict):
+        provs = cfg["provider"] = {}
+    prov = provs.setdefault(provider_id, {})
+    if not isinstance(prov, dict):
+        prov = provs[provider_id] = {}
     prov["npm"] = "@ai-sdk/openai-compatible"
     prov["name"] = name
-    prov["options"] = {"baseURL": base_url}
-    has_secret = False
-    if api_key:
-        prov["options"]["apiKey"] = api_key
-        has_secret = True
+    prov["options"] = {"baseURL": base_url, "apiKey": (api_key or "").strip() or "local"}
 
-    existing_models = prov.setdefault("models", {})
-    for m in models:
-        mid = m["id"] if isinstance(m, dict) else str(m)
-        mname = m.get("name", mid) if isinstance(m, dict) else mid
-        is_reasoning = "r1" in mid.lower() or "reasoning" in mid.lower() or "thinking" in mid.lower()
+    existing_models = prov.get("models")
+    if not isinstance(existing_models, dict):
+        existing_models = prov["models"] = {}
+    for m in models or []:
+        mid = m.get("id") if isinstance(m, dict) else str(m)
+        if not mid:
+            continue
+        mname = (m.get("name") or mid) if isinstance(m, dict) else mid
+        is_reasoning = is_reasoning_model(mid)
         existing_models[mid] = {
             "name": mname,
             "tool_call": True,
             "reasoning": is_reasoning,
         }
 
-    try:
-        os.chmod(path, 0o600 if has_secret else 0o644)
-    except OSError:
-        pass
     _write(path, cfg)
+    return redact(cfg)
 
-    def _mask(v: Any) -> Any:
-        if isinstance(v, dict):
-            out = {}
-            for k, val in v.items():
-                if k == "apiKey" and isinstance(val, str) and val and val != "local":
-                    tail = val[-4:] if len(val) > 8 else ""
-                    out[k] = f"{val[:4]}...{tail}" if tail else "****"
-                else:
-                    out[k] = _mask(val)
-            return out
-        if isinstance(v, list):
-            return [_mask(x) for x in v]
-        return v
 
-    return _mask(cfg)
+def is_reasoning_model(model_id: str) -> bool:
+    low = model_id.lower()
+    return "r1" in low or "reasoning" in low or "thinking" in low
+
+
+def valid_host(host: str) -> bool:
+    """Plain hostname / IPv4 / bracket-free IPv6 only: no URL syntax smuggling."""
+    host = (host or "").strip()
+    if not host or len(host) > 253:
+        return False
+    return not any(c in host for c in "/@?#" + chr(92) + " \t\r\n[]")

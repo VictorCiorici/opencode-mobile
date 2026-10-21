@@ -31,9 +31,11 @@ class Instance:
         if self.proc and self.proc.poll() is None:
             self.last_used = time.time()
             return
+        self.last_used = time.time()
         self.proc = subprocess.Popen(
             [OPENCODE_BIN, "serve", "--port", str(self.port), "--hostname", "127.0.0.1"],
             cwd=self.path,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -74,10 +76,17 @@ class Manager:
                 self._instances[pid] = inst
                 self._ports.add(inst.port)
                 created = True
-            inst.start()
+            try:
+                inst.start()
+            except OSError as e:
+                self._instances.pop(pid, None)
+                self._ports.discard(inst.port)
+                raise RuntimeError(f"cannot launch opencode ({e}). Is it installed?")
         if created or await self.needs_wait(inst):
             ok = await self._wait_healthy(inst)
             if not ok:
+                # Don't leak a half-started process (or its port) on failure.
+                await self.stop_instance(pid)
                 raise RuntimeError(
                     f"opencode failed to start for project '{pid}'. "
                     "Is 'opencode' installed inside this Debian proot?"
@@ -114,6 +123,10 @@ class Manager:
                 inst.stop()
                 if remove:
                     self._ports.discard(inst.port)
+
+    async def stop_all(self) -> None:
+        for pid in list(self._instances):
+            await self.stop_instance(pid)
 
     async def reap_idle(self, max_idle: float = 1800.0) -> None:
         """Stop instances unused for max_idle seconds (called periodically)."""

@@ -25,3 +25,30 @@ OPENCODE_BIN = os.environ.get("OCMB_OPENCODE_BIN", "opencode")
 # Optional bearer token. If set, every /api request must send
 # "Authorization: Bearer <token>".
 AUTH_TOKEN = os.environ.get("OCMB_TOKEN") or None
+
+# Extra Host header names accepted while bound to loopback (comma-separated),
+# e.g. a reverse proxy name. Loopback names are always accepted.
+ALLOWED_HOSTS = {h.strip().lower() for h in os.environ.get("OCMB_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+
+def write_private(path, text: str, mode: int = 0o600) -> None:
+    """Atomically write text to path, creating the file with `mode` from the
+    start (no window where a secret is world-readable)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
