@@ -23,7 +23,13 @@ public class ProcessManager {
     private static final int PORT = 8787;
     private static final String PID_FILE = "daemon.pid";
     private static ProcessManager instance;
+    private static final long MAX_LOG_BYTES = 4L * 1024 * 1024;
+    private static final int MAX_RESTARTS = 5;
     private Process bridgeProcess;
+    /** Set by stopProcesses so the supervisor does not resurrect the daemon. */
+    private volatile boolean stopping = false;
+    private int restarts = 0;
+    private long startedAt = 0;
 
     public static synchronized ProcessManager getInstance() {
         if (instance == null) {
@@ -139,7 +145,33 @@ public class ProcessManager {
         }
     }
 
+    private static boolean isAlive(Process p) {
+        if (p == null) return false;
+        try {
+            p.exitValue();
+            return false;
+        } catch (IllegalThreadStateException e) {
+            return true;
+        }
+    }
+
+    /** Keeps daemon.log bounded: rotate to daemon.log.1 once it grows too big. */
+    private static void rotateLog(File logFile) {
+        if (logFile.length() > MAX_LOG_BYTES) {
+            File old = new File(logFile.getPath() + ".1");
+            old.delete();
+            logFile.renameTo(old);
+        }
+    }
+
     public synchronized void startProcesses(Context context) {
+        stopping = false;
+        // Service restarts (activity relaunch, fold/unfold) call this repeatedly;
+        // a daemon we spawned that is still booting is not "stale" — keep it.
+        if (isAlive(bridgeProcess)) {
+            Log.i(TAG, "Daemon process already running, not respawning");
+            return;
+        }
         String myVersion;
         try {
             myVersion = context.getPackageManager()
@@ -218,12 +250,17 @@ public class ProcessManager {
             pb.directory(filesDir);
             pb.redirectErrorStream(true);
 
-            bridgeProcess = pb.start();
-            writePidFile(context, bridgeProcess);
+            rotateLog(logFile);
+            final Process proc = pb.start();
+            bridgeProcess = proc;
+            startedAt = System.currentTimeMillis();
+            writePidFile(context, proc);
+            final Context appCtx = context.getApplicationContext();
 
-            // Pipe daemon logs to file for debugging
+            // Pipe daemon logs to file, then supervise: an unexpected exit is
+            // restarted with backoff so the UI does not silently lose its backend.
             new Thread(() -> {
-                try (InputStream in = bridgeProcess.getInputStream();
+                try (InputStream in = proc.getInputStream();
                      FileOutputStream out = new FileOutputStream(logFile, true)) {
                     byte[] buf = new byte[4096];
                     int len;
@@ -231,7 +268,10 @@ public class ProcessManager {
                         out.write(buf, 0, len);
                     }
                 } catch (Exception ignored) {}
-            }).start();
+                int code = -1;
+                try { code = proc.waitFor(); } catch (InterruptedException ignored) {}
+                onDaemonExit(appCtx, proc, code);
+            }, "daemon-supervisor").start();
 
             Log.i(TAG, "OpenForge native daemon launched successfully");
 
@@ -260,7 +300,30 @@ public class ProcessManager {
         } catch (Throwable ignored) {}
     }
 
+    private void onDaemonExit(Context context, Process proc, int code) {
+        int attempt;
+        synchronized (this) {
+            if (stopping || proc != bridgeProcess) return;
+            bridgeProcess = null;
+            // A daemon that ran for a while before dying is a fresh failure,
+            // not part of a crash loop.
+            if (System.currentTimeMillis() - startedAt > 60000L) restarts = 0;
+            if (restarts >= MAX_RESTARTS) {
+                Log.e(TAG, "Daemon exited (code " + code + "); giving up after " + restarts + " restarts");
+                return;
+            }
+            attempt = ++restarts;
+        }
+        long delay = Math.min(30000L, 1000L << (attempt - 1));
+        Log.w(TAG, "Daemon exited (code " + code + "); restart " + attempt + " in " + delay + "ms");
+        try { Thread.sleep(delay); } catch (InterruptedException e) { return; }
+        if (stopping) return;
+        startProcesses(context);
+    }
+
     public synchronized void stopProcesses() {
+        stopping = true;
+        restarts = 0;
         if (bridgeProcess != null) {
             bridgeProcess.destroy();
             bridgeProcess = null;

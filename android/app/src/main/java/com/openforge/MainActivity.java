@@ -44,6 +44,8 @@ public class MainActivity extends Activity {
     private static final int REQ_LEGACY_STORAGE = 2002;
 
     private WebView web;
+    /** Main-frame URL, tracked on the UI thread; read from the JS-bridge thread. */
+    private volatile String currentUrl = "";
     private FrameLayout splashView;
     private ValueCallback<Uri[]> uploadMessage;
     private Handler handler = new Handler(Looper.getMainLooper());
@@ -54,8 +56,16 @@ public class MainActivity extends Activity {
     public class OpenForgeBridge {
         @JavascriptInterface
         public String bridgeToken() {
+            // The interface is visible to every page the WebView renders, so
+            // only hand the daemon token to our own UI origin or loopback.
+            if (!isTrustedUrl(currentUrl)) return "";
             return ProcessManager.ensureBridgeToken(MainActivity.this);
         }
+    }
+
+    /** Our bundled UI and the local daemon are the only trusted origins. */
+    static boolean isTrustedUrl(String url) {
+        return UrlTrust.isTrusted(url);
     }
 
     @Override
@@ -93,6 +103,12 @@ public class MainActivity extends Activity {
         // so file:// access (and its universal cross-origin escape hatch) is off.
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(false);
+        s.setAllowFileAccessFromFileURLs(false);
+        s.setAllowUniversalAccessFromFileURLs(false);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
 
         // Secure origin for the bundled UI: intercept appassets.androidplatform.net
         // and map /assets/* onto the APK assets/web/ folder (populated by CI).
@@ -111,7 +127,30 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri u = request.getUrl();
+                if (isTrustedUrl(u.toString())) return false;
+                // External links (docs, GitHub, share URLs) open in the system
+                // browser so the app shell — and its token — never navigate away.
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, u));
+                } catch (Exception ignored) {}
+                return true;
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String u, android.graphics.Bitmap favicon) {
+                currentUrl = u == null ? "" : u;
+            }
+
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String u, boolean isReload) {
+                currentUrl = u == null ? "" : u;
+            }
+
+            @Override
             public void onPageFinished(WebView view, String u) {
+                currentUrl = u == null ? "" : u;
                 if (splashView != null && !loaded) {
                     loaded = true;
                     splashView.setVisibility(View.GONE);
@@ -258,6 +297,7 @@ public class MainActivity extends Activity {
                 try { Thread.sleep(200); } catch (Exception ignored) {}
             }
             handler.post(() -> {
+                if (web == null || isFinishing()) return;
                 web.loadUrl(targetUrl);
                 handler.postDelayed(() -> {
                     if (splashView != null) splashView.setVisibility(View.GONE);
@@ -281,10 +321,46 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (web != null && web.canGoBack()) {
-            web.goBack();
-        } else {
+        if (web == null) {
             super.onBackPressed();
+            return;
         }
+        // Let the UI close its own overlays (drawers, modals, editor) first;
+        // window.OpenForgeBack() returns true when it consumed the gesture.
+        web.evaluateJavascript(
+                "(function(){try{return !!(window.OpenForgeBack&&window.OpenForgeBack());}catch(e){return false;}})()",
+                result -> {
+                    if ("true".equals(result)) return;
+                    if (web.canGoBack()) {
+                        web.goBack();
+                    } else {
+                        // Keep the daemon and UI state alive instead of destroying the activity.
+                        moveTaskToBack(true);
+                    }
+                });
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (web != null) web.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        if (web != null) web.onPause();
+        super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        if (web != null) {
+            web.stopLoading();
+            web.setWebChromeClient(null);
+            web.destroy();
+            web = null;
+        }
+        super.onDestroy();
     }
 }
