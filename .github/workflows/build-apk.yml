@@ -171,3 +171,17 @@ jobs:
       - name: Run bridge tests
         working-directory: server
         run: python -m pytest tests/ -v
+
+  pwa-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Syntax-check and unit-test the PWA
+        run: |
+          for f in pwa/js/*.js pwa/sw.js; do node --check "$f"; done
+          node --test pwa/tests/
