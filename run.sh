@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/env bash
+#!/usr/bin/env bash
 # OpenForge — Termux / proot-Debian launcher.
 #
 # Starts the Python bridge (server/) which serves the same web UI and API as
