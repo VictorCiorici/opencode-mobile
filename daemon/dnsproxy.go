@@ -131,9 +131,15 @@ func (p *dnsProxy) handle(w http.ResponseWriter, r *http.Request) {
 	buf.Flush()
 
 	done := make(chan struct{}, 2)
-	go func() { io.Copy(dst, conn); done <- struct{}{} }()
+	// Read from buf (not conn): it may already hold bytes the client sent
+	// right after the CONNECT request (e.g. an eager TLS ClientHello).
+	go func() { io.Copy(dst, buf); done <- struct{}{} }()
 	go func() { io.Copy(conn, dst); done <- struct{}{} }()
+	// When either direction ends, tear down both so the other copier and the
+	// sockets are released instead of lingering on half-open connections.
 	<-done
+	conn.Close()
+	dst.Close()
 	<-done
 }
 
@@ -153,6 +159,7 @@ func (p *dnsProxy) forwardHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer dst.Close()
 	r.RequestURI = ""
+	r.Header.Del("Proxy-Connection")
 	if err := r.Write(dst); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

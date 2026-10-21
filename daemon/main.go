@@ -21,13 +21,17 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unicode"
 )
 
 type Config struct {
@@ -176,20 +180,77 @@ func main() {
 		mux.Handle("/", fs)
 	}
 
-	handler := corsMiddleware(authMiddleware(mux))
+	handler := hostGuardMiddleware(corsMiddleware(authMiddleware(mux)))
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	log.Printf("🚀 OpenForge Native Daemon listening on http://%s (workspace: %s, auth: %s)", addr, cfg.WorkspaceDir, map[bool]string{true: "token", false: "off"}[cfg.Token != ""])
-	log.Fatal(http.ListenAndServe(addr, handler))
+	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 15 * time.Second}
+	// Reap engine children on shutdown so they are not orphaned.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		instMgr.StopAll()
+		srv.Close()
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+}
+
+// allowedOrigin reports whether a browser origin may read daemon responses.
+// Only the Android asset-loader shell and pages served by a loopback daemon
+// qualify; a wildcard would let any website the user visits read the public
+// GET endpoints (folder browser, project list, auth status).
+func allowedOrigin(origin string) bool {
+	if origin == "https://appassets.androidplatform.net" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
+}
+
+func isLoopbackHost(h string) bool {
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if origin := r.Header.Get("Origin"); origin != "" && allowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostGuardMiddleware defeats DNS rebinding: while the daemon listens on
+// loopback, a request whose Host is some other name came from a web page that
+// re-pointed its own domain at 127.0.0.1 and must not be served.
+func hostGuardMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isLoopbackHost(cfg.Host) {
+			host := r.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			host = strings.Trim(host, "[]")
+			if host != "" && !isLoopbackHost(host) {
+				writeErr(w, http.StatusForbidden, "host not allowed")
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -258,9 +319,41 @@ func checkToken(provided string) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1 && len(provided) == len(cfg.Token)
 }
 
+// alwaysProtected lists state-changing or network-probing endpoints that sit
+// under otherwise-public prefixes and must carry the bearer token regardless
+// of HTTP method.
+var alwaysProtected = map[string]bool{
+	"/api/auth/token":            true,
+	"/api/models/scan-lan":       true,
+	"/api/models/probe-host":     true,
+	"/api/models/register-local": true,
+}
+
+// needsAuth reports whether a request must present the bearer token. Public
+// paths are only public for read-only methods; anything that mutates state
+// (project create/import/clone, workspace, favorites, model config, ...)
+// requires the token even if the same path is open for GET.
+func needsAuth(method, p string) bool {
+	if alwaysProtected[p] {
+		return true
+	}
+	if isAPIPath(p) {
+		return true
+	}
+	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+		return false
+	}
+	// Non-read request on a path isAPIPath considers public.
+	switch p {
+	case "/api/health", "/health":
+		return false
+	}
+	return strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/projects") || strings.HasPrefix(p, "/git/")
+}
+
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if cfg.Token != "" && isAPIPath(r.URL.Path) {
+		if cfg.Token != "" && needsAuth(r.Method, r.URL.Path) {
 			if !checkToken(bearerFromRequest(r)) {
 				writeErr(w, http.StatusUnauthorized, "unauthorized")
 				return
@@ -308,6 +401,20 @@ func decodeBody(r *http.Request, v interface{}) {
 	json.Unmarshal(b, v)
 }
 
+// resolveExisting resolves symlinks for p. When p (or its tail) does not exist
+// yet, the deepest existing ancestor is resolved and the missing remainder is
+// re-appended, so a symlinked ancestor can never hide an escape on writes.
+func resolveExisting(p string) string {
+	if rp, err := filepath.EvalSymlinks(p); err == nil {
+		return rp
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p
+	}
+	return filepath.Join(resolveExisting(parent), filepath.Base(p))
+}
+
 // safeJoin resolves rel under root and rejects escapes and symlink traversal.
 func safeJoin(root, rel string) (string, error) {
 	absRoot, err := filepath.Abs(root)
@@ -315,31 +422,26 @@ func safeJoin(root, rel string) (string, error) {
 		return "", err
 	}
 	full := filepath.Clean(filepath.Join(absRoot, rel))
-	realRoot, err := filepath.EvalSymlinks(absRoot)
-	if err != nil {
-		realRoot = absRoot
-	}
-	realFull, err := filepath.EvalSymlinks(full)
-	if err != nil {
-		// Target may not exist yet (write); evaluate the deepest existing parent.
-		dir := filepath.Dir(full)
-		if rd, derr := filepath.EvalSymlinks(dir); derr == nil {
-			realFull = filepath.Join(rd, filepath.Base(full))
-		} else {
-			realFull = full
-		}
-	}
-	for _, r := range []string{realRoot, absRoot} {
-		rel2, rerr := filepath.Rel(r, realFull)
-		if rerr == nil && rel2 != ".." && !strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
-			return full, nil
-		}
+	realRoot := resolveExisting(absRoot)
+	realFull := resolveExisting(full)
+	rel2, rerr := filepath.Rel(realRoot, realFull)
+	if rerr == nil && rel2 != ".." && !strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
+		return full, nil
 	}
 	return "", fmt.Errorf("path escapes project root")
 }
 
 // safeRef guards git rev / branch arguments against option injection.
 var refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/\-]*$`)
+
+// safeGitURL rejects option injection (e.g. --upload-pack=...), the ext::
+// transport (arbitrary command execution) and control characters.
+func safeGitURL(u string) bool {
+	if u == "" || strings.HasPrefix(u, "-") || strings.HasPrefix(strings.ToLower(u), "ext::") {
+		return false
+	}
+	return strings.IndexFunc(u, unicode.IsControl) < 0
+}
 
 func safeRef(s string) (string, error) {
 	s = strings.TrimSpace(s)
@@ -371,6 +473,17 @@ type Instance struct {
 	Port     int
 	Cmd      *exec.Cmd
 	LastUsed time.Time
+	Started  time.Time
+	exited   chan struct{} // closed once the process has been reaped
+}
+
+func (i *Instance) hasExited() bool {
+	select {
+	case <-i.exited:
+		return true
+	default:
+		return false
+	}
 }
 
 type Manager struct {
@@ -503,9 +616,11 @@ func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
 		Port:     port,
 		Cmd:      cmd,
 		LastUsed: time.Now(),
+		Started:  time.Now(),
+		exited:   make(chan struct{}),
 	}
 	m.instances[pid] = inst
-	go func() { cmd.Wait() }()
+	go func() { cmd.Wait(); close(inst.exited) }()
 	return inst, nil
 }
 
@@ -518,58 +633,69 @@ func (m *Manager) waitHealthy(inst *Instance) *Instance {
 		if isPortHealthy(inst.Port) {
 			return inst
 		}
+		if inst.hasExited() {
+			break
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	m.mu.Lock()
-	delete(m.instances, inst.PID)
+	if m.instances[inst.PID] == inst {
+		delete(m.instances, inst.PID)
+	}
 	m.mu.Unlock()
 	inst.Cmd.Process.Kill()
 	return inst
 }
 
-func (m *Manager) Get(pid string) (*Instance, error) {
+// acquire returns a healthy instance for pid, reusing one that is still
+// starting up (so concurrent first requests do not each spawn an engine) and
+// replacing a dead or wedged one (killing it so no process is leaked).
+func (m *Manager) acquire(pid string, dirFn func() (string, error)) (*Instance, error) {
 	m.mu.Lock()
-
 	if inst, ok := m.instances[pid]; ok {
-		if inst.Cmd != nil && inst.Cmd.Process != nil && isPortHealthy(inst.Port) {
-			inst.LastUsed = time.Now()
-			m.mu.Unlock()
-			return inst, nil
+		if inst.Cmd != nil && inst.Cmd.Process != nil && !inst.hasExited() {
+			if isPortHealthy(inst.Port) {
+				inst.LastUsed = time.Now()
+				m.mu.Unlock()
+				return inst, nil
+			}
+			if time.Since(inst.Started) < 30*time.Second {
+				// Still booting: wait for it instead of spawning a duplicate.
+				m.mu.Unlock()
+				return m.waitHealthy(inst), nil
+			}
+			inst.Cmd.Process.Kill()
 		}
+		delete(m.instances, pid)
 	}
-
-	proj := findProject(pid)
-	if proj == nil {
+	dir, err := dirFn()
+	if err != nil {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("project '%s' not found", pid)
+		return nil, err
 	}
-
-	inst, err := m.spawnLocked(pid, proj.Path)
+	inst, err := m.spawnLocked(pid, dir)
 	m.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	return m.waitHealthy(inst), nil
+}
+
+func (m *Manager) Get(pid string) (*Instance, error) {
+	return m.acquire(pid, func() (string, error) {
+		proj := findProject(pid)
+		if proj == nil {
+			return "", fmt.Errorf("project '%s' not found", pid)
+		}
+		return proj.Path, nil
+	})
 }
 
 // GetShared returns a project-independent opencode instance (spawned in the
 // workspace root) used for global queries like the provider/model catalog.
 // This is the ground truth for what the *connected* opencode actually offers.
 func (m *Manager) GetShared() (*Instance, error) {
-	m.mu.Lock()
-	if inst, ok := m.instances["__shared__"]; ok {
-		if inst.Cmd != nil && inst.Cmd.Process != nil && isPortHealthy(inst.Port) {
-			inst.LastUsed = time.Now()
-			m.mu.Unlock()
-			return inst, nil
-		}
-	}
-	inst, err := m.spawnLocked("__shared__", getWorkspaceDir())
-	m.mu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	return m.waitHealthy(inst), nil
+	return m.acquire("__shared__", func() (string, error) { return getWorkspaceDir(), nil })
 }
 
 func (m *Manager) Stop(pid string) bool {
@@ -623,14 +749,53 @@ func (m *Manager) reapLoop() {
 func isPortHealthy(port int) bool {
 	client := &http.Client{Timeout: 300 * time.Millisecond}
 	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/global/health", port))
-	if err == nil && resp.StatusCode == 200 {
-		resp.Body.Close()
-		return true
+	if err != nil {
+		return false
 	}
-	return false
+	resp.Body.Close()
+	return resp.StatusCode == 200
 }
 
 // ---------------------------------------------------------------- Health ---
+
+var (
+	verMu       sync.Mutex
+	verCachePth string
+	verCacheVer string
+	verCacheErr string
+	verCacheAt  time.Time
+)
+
+// engineVersion runs `<engine> --version` with a timeout and caches the result
+// briefly: /health is polled often and must not spawn an engine every time.
+func engineVersion(enginePath string) (string, string) {
+	verMu.Lock()
+	defer verMu.Unlock()
+	if verCachePth == enginePath && time.Since(verCacheAt) < time.Minute {
+		return verCacheVer, verCacheErr
+	}
+	var version, engineErr string
+	cmd := engineCommand(enginePath, "--version")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Start()
+	if err == nil {
+		timer := time.AfterFunc(10*time.Second, func() { cmd.Process.Kill() })
+		err = cmd.Wait()
+		timer.Stop()
+	}
+	if err == nil {
+		version = strings.TrimSpace(stdout.String())
+	} else if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		// Surface exec failures (SELinux W^X, truncated extraction, ...)
+		// so the client can diagnose without shell access.
+		engineErr = msg
+	} else {
+		engineErr = err.Error()
+	}
+	verCachePth, verCacheVer, verCacheErr, verCacheAt = enginePath, version, engineErr, time.Now()
+	return version, engineErr
+}
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	enginePath := findOpenCodeBinary()
@@ -639,18 +804,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	version := ""
 	engineErr := ""
 	if engineFound {
-		out, err := engineCommand(enginePath, "--version").Output()
-		if err == nil {
-			version = strings.TrimSpace(string(out))
-		} else {
-			// Surface exec failures (SELinux W^X, truncated extraction, …)
-			// so the client can diagnose without shell access.
-			if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-				engineErr = strings.TrimSpace(string(ee.Stderr))
-			} else {
-				engineErr = err.Error()
-			}
-		}
+		version, engineErr = engineVersion(enginePath)
 	}
 	writeJSON(w, http.StatusOK, blob{
 		"bridge":         "ok",
@@ -697,14 +851,65 @@ func readRegistry() Registry {
 }
 
 func writeRegistry(reg Registry) {
-	b, _ := json.MarshalIndent(reg, "", "  ")
-	os.WriteFile(getRegistryPath(), b, 0644)
+	b, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		log.Printf("registry: marshal: %v", err)
+		return
+	}
+	if err := writeFileAtomic(getRegistryPath(), b, 0644); err != nil {
+		log.Printf("registry: write: %v", err)
+	}
 }
+
+// writeFileAtomic writes via a temp file + rename so a crash or concurrent
+// reader never sees a truncated file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	os.Chmod(tmpName, perm)
+	if err := os.Rename(tmpName, path); err != nil {
+		// Windows cannot rename over an existing file in some cases.
+		os.Remove(path)
+		if err2 := os.Rename(tmpName, path); err2 != nil {
+			os.Remove(tmpName)
+			return err2
+		}
+	}
+	return nil
+}
+
+// uniqueProjectID is uniqueSlug that additionally avoids ids whose folder
+// already exists under the workspace, so create/clone never merge into (or
+// later delete) a pre-existing directory.
+func uniqueProjectID(reg Registry, slug string) string {
+	if slug == "" {
+		slug = fmt.Sprintf("project-%d", time.Now().Unix())
+	}
+	ws := getWorkspaceDir()
+	pid := uniqueSlug(reg, slug)
+	for i := 2; statOK(filepath.Join(ws, pid)); i++ {
+		pid = uniqueSlug(reg, fmt.Sprintf("%s-%d", slug, i))
+	}
+	return pid
+}
+
+var slugRe = regexp.MustCompile("[^a-z0-9]+")
 
 func slugify(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
-	reg := regexp.MustCompile("[^a-z0-9]+")
-	s = reg.ReplaceAllString(s, "-")
+	s = slugRe.ReplaceAllString(s, "-")
 	return strings.Trim(s, "-")
 }
 
@@ -742,9 +947,6 @@ func handleProjects(w http.ResponseWriter, r *http.Request) {
 		}
 		decodeBody(r, &req)
 		slug := slugify(req.Name)
-		if slug == "" {
-			slug = fmt.Sprintf("project-%d", time.Now().Unix())
-		}
 		branch := req.InitialBr
 		if branch == "" {
 			branch = req.InitialBranch
@@ -756,13 +958,19 @@ func handleProjects(w http.ResponseWriter, r *http.Request) {
 			branch = "main"
 		}
 
-		pid := uniqueSlug(reg, slug)
+		pid := uniqueProjectID(reg, slug)
 		projPath := filepath.Join(getWorkspaceDir(), pid)
-		os.MkdirAll(projPath, 0755)
+		if err := os.MkdirAll(projPath, 0755); err != nil {
+			writeErr(w, http.StatusInternalServerError, "cannot create project folder: "+err.Error())
+			return
+		}
 
 		gitInit := req.GitInit == nil || *req.GitInit
 		if gitInit {
-			gitCmd("init", "--initial-branch", branch, projPath).Run()
+			if _, berr := safeRef(branch); berr != nil {
+				branch = "main"
+			}
+			gitCmd("init", "--initial-branch="+branch, projPath).Run()
 			cmd := gitCmd("commit", "--allow-empty", "-m", "initial commit")
 			cmd.Dir = projPath
 			cmd.Run()
@@ -802,7 +1010,11 @@ func handleProjectImport(w http.ResponseWriter, r *http.Request) {
 
 	reg := readRegistry()
 	name := filepath.Base(absPath)
-	pid := uniqueSlug(reg, slugify(name))
+	slug := slugify(name)
+	if slug == "" {
+		slug = fmt.Sprintf("project-%d", time.Now().Unix())
+	}
+	pid := uniqueSlug(reg, slug)
 	proj := Project{ID: pid, Name: name, Path: absPath}
 	reg.Projects = append(reg.Projects, proj)
 	writeRegistry(reg)
@@ -826,10 +1038,14 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Repository URL required")
 		return
 	}
+	if !safeGitURL(gitURL) {
+		writeErr(w, http.StatusBadRequest, "Invalid repository URL")
+		return
+	}
 
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		base := filepath.Base(gitURL)
+		base := path.Base(strings.TrimRight(gitURL, "/"))
 		name = strings.TrimSuffix(base, ".git")
 	}
 
@@ -837,7 +1053,7 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 	defer lock.Unlock()
 
 	reg := readRegistry()
-	pid := uniqueSlug(reg, slugify(name))
+	pid := uniqueProjectID(reg, slugify(name))
 	destPath := filepath.Join(getWorkspaceDir(), pid)
 	os.MkdirAll(filepath.Dir(destPath), 0755)
 
@@ -845,12 +1061,19 @@ func handleProjectClone(w http.ResponseWriter, r *http.Request) {
 	if req.Branch != "" {
 		args = append(args, "--branch", strings.TrimSpace(req.Branch))
 	}
-	args = append(args, gitURL, destPath)
+	args = append(args, "--", gitURL, destPath)
 
 	cmd := gitCmd(args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var errOut bytes.Buffer
 	cmd.Stderr = &errOut
-	if err := cmd.Run(); err != nil {
+	var cerr error
+	if cerr = cmd.Start(); cerr == nil {
+		timer := time.AfterFunc(10*time.Minute, func() { cmd.Process.Kill() })
+		cerr = cmd.Wait()
+		timer.Stop()
+	}
+	if err := cerr; err != nil {
 		os.RemoveAll(destPath)
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("Git clone failed: %s %v", strings.TrimSpace(errOut.String()), err))
 		return
@@ -1008,7 +1231,15 @@ func handleFS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer f.Close()
-		content, _ := io.ReadAll(io.LimitReader(f, 2<<20)) // 2 MB cap
+		if fi, serr := f.Stat(); serr != nil || fi.IsDir() {
+			writeErr(w, http.StatusBadRequest, "not a file")
+			return
+		}
+		content, rerr := io.ReadAll(io.LimitReader(f, 2<<20)) // 2 MB cap
+		if rerr != nil {
+			writeErr(w, http.StatusInternalServerError, rerr.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, blob{"content": string(content), "path": rel})
 
 	case "write":
@@ -1025,12 +1256,19 @@ func handleFS(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusRequestEntityTooLarge, "file too large (8 MB cap)")
 			return
 		}
+		if strings.TrimSpace(req.Path) == "" {
+			writeErr(w, http.StatusBadRequest, "path required")
+			return
+		}
 		filePath, jerr := safeJoin(proj.Path, req.Path)
 		if jerr != nil {
 			writeErr(w, http.StatusBadRequest, jerr.Error())
 			return
 		}
-		os.MkdirAll(filepath.Dir(filePath), 0755)
+		if merr := os.MkdirAll(filepath.Dir(filePath), 0755); merr != nil {
+			writeErr(w, http.StatusInternalServerError, merr.Error())
+			return
+		}
 		if werr := os.WriteFile(filePath, []byte(req.Content), 0644); werr != nil {
 			writeErr(w, http.StatusInternalServerError, werr.Error())
 			return
@@ -1098,10 +1336,17 @@ func runGit(dir string, args ...string) (string, error) {
 	full := append([]string{"-c", "safe.directory=*"}, args...)
 	cmd := gitCmd(full...)
 	cmd.Dir = dir
+	// Never block on an interactive credential prompt (no tty on a phone).
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		timer := time.AfterFunc(5*time.Minute, func() { cmd.Process.Kill() })
+		err = cmd.Wait()
+		timer.Stop()
+	}
 	return strings.TrimSpace(out.String()), err
 }
 
@@ -1545,6 +1790,11 @@ func handleGit(w http.ResponseWriter, r *http.Request) {
 		if remote == "" {
 			remote = "origin"
 		}
+		remote, rerr := safeRef(remote)
+		if rerr != nil {
+			writeErr(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
 		out, err := runGitOK(proj.Path, "fetch", remote)
 		writeOut(w, orText(out, "fetched from "+remote), err)
 
@@ -1572,6 +1822,10 @@ func handleGit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rel, _ := filepath.Rel(proj.Path, clean)
+		if rel == "." || strings.TrimSpace(req.Ref) == "" {
+			writeErr(w, http.StatusBadRequest, "file path required")
+			return
+		}
 		out, err := runGitOK(proj.Path, "checkout", "--", rel)
 		writeOut(w, orText(out, "discarded changes in "+rel), err)
 
@@ -1613,6 +1867,10 @@ func handleGit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rel, _ := filepath.Rel(proj.Path, clean)
+		if rel == "." || strings.TrimSpace(req.Path) == "" {
+			writeErr(w, http.StatusBadRequest, "file path required")
+			return
+		}
 		flag := "--ours"
 		if req.Choice == "theirs" {
 			flag = "--theirs"
@@ -1683,6 +1941,41 @@ func handleGit(w http.ResponseWriter, r *http.Request) {
 
 	case "remotes":
 		writeJSON(w, http.StatusOK, blob{"remotes": remotesList(proj.Path)})
+
+	case "remote":
+		sub := ""
+		if len(parts) >= 3 {
+			sub = parts[2]
+		}
+		var req struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		}
+		decodeBody(r, &req)
+		name, rerr := safeRef(req.Name)
+		if rerr != nil {
+			writeErr(w, http.StatusBadRequest, "invalid remote name")
+			return
+		}
+		u := strings.TrimSpace(req.URL)
+		switch sub {
+		case "add", "set-url":
+			if !safeGitURL(u) {
+				writeErr(w, http.StatusBadRequest, "invalid remote URL")
+				return
+			}
+			gitSub := "add"
+			if sub == "set-url" {
+				gitSub = "set-url"
+			}
+			out, err := runGitOK(proj.Path, "remote", gitSub, "--", name, u)
+			writeOut(w, orText(out, name+" → "+u), err)
+		case "remove":
+			out, err := runGitOK(proj.Path, "remote", "remove", "--", name)
+			writeOut(w, orText(out, "removed "+name), err)
+		default:
+			writeErr(w, http.StatusNotFound, "unknown remote action")
+		}
 
 	case "stash":
 		if len(parts) >= 3 {
@@ -1778,6 +2071,24 @@ func shellCommand(ctx context.Context, command string) *exec.Cmd {
 	return exec.CommandContext(ctx, "/system/bin/sh", "-c", command)
 }
 
+// capBuffer is a bytes.Buffer that silently drops output past max, so a
+// runaway command cannot exhaust memory.
+type capBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	if room := c.max - c.Len(); room > 0 {
+		if len(p) > room {
+			c.Buffer.Write(p[:room])
+		} else {
+			c.Buffer.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
 func handleTerminal(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1812,16 +2123,20 @@ func handleTerminal(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	cmd := shellCommand(ctx, command)
 	cmd.Dir = proj.Path
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// Grandchildren can keep the output pipes open after the shell is killed;
+	// WaitDelay force-closes them so the handler cannot hang.
+	cmd.WaitDelay = 2 * time.Second
+	stdout := &capBuffer{max: 1 << 20}
+	stderr := &capBuffer{max: 1 << 20}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	code := 0
 	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code = exitErr.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
+		if ctx.Err() == context.DeadlineExceeded {
 			stderr.WriteString(fmt.Sprintf("\nCommand timed out after %gs", timeout))
 			code = -1
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
 		} else {
 			stderr.WriteString("\n" + err.Error())
 			code = -1
@@ -2030,11 +2345,10 @@ func writeOpencodeConfig(cfgMap map[string]interface{}, secret bool) error {
 	if err != nil {
 		return err
 	}
-	mode := os.FileMode(0644)
 	if secret {
-		mode = 0600
+		return writeFileSecret(opencodeConfigPath(), out)
 	}
-	return os.WriteFile(opencodeConfigPath(), out, mode)
+	return os.WriteFile(opencodeConfigPath(), out, 0644)
 }
 
 func maskSecret(t string) string {
@@ -2060,6 +2374,8 @@ func handleRegisterLocal(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "provider_id and base_url are required")
 		return
 	}
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
 
 	fullCfg := readOpencodeConfig()
 	providers, _ := fullCfg["provider"].(map[string]interface{})
@@ -2354,8 +2670,16 @@ func catalogProviders() []ProvInfo {
 
 // model delete/add parity with the Python bridge -----------------------------
 
+var (
+	favMu  sync.Mutex // serializes favorites.json read-modify-write
+	cfgMu  sync.Mutex // serializes opencode.json / auth.json read-modify-write
+	sessMu sync.Mutex // serializes standalone session/message files
+)
+
 func handleFavorites(w http.ResponseWriter, r *http.Request) {
 	favPath := filepath.Join(cfg.DataDir, "favorites.json")
+	favMu.Lock()
+	defer favMu.Unlock()
 	var favs struct {
 		Favorites []string `json:"favorites"`
 	}
@@ -2397,7 +2721,10 @@ func handleFavorites(w http.ResponseWriter, r *http.Request) {
 		}
 		favs.Favorites = next
 		out, _ := json.Marshal(favs)
-		os.WriteFile(favPath, out, 0600)
+		if err := writeFileAtomic(favPath, out, 0600); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, blob{"favorites": next, "added": added})
 		return
 	}
@@ -2420,6 +2747,8 @@ func handleModelsWrite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "provider_id and model_id are required")
 		return
 	}
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
 
 	fullCfg := readOpencodeConfig()
 	prov, _ := fullCfg["provider"].(map[string]interface{})
@@ -2467,6 +2796,8 @@ func handleModelsDelete(w http.ResponseWriter, r *http.Request) {
 		ModelID    string `json:"model_id"`
 	}
 	decodeBody(r, &req)
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
 	fullCfg := readOpencodeConfig()
 	if prov, ok := fullCfg["provider"].(map[string]interface{}); ok {
 		if pObj, ok := prov[req.ProviderID].(map[string]interface{}); ok {
@@ -2707,6 +3038,12 @@ func handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		provider = "opencode"
 	}
 	tok := strings.TrimSpace(req.Token)
+	if strings.ContainsAny(tok, "\r\n") {
+		writeErr(w, http.StatusBadRequest, "token must not contain newlines")
+		return
+	}
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
 
 	switch provider {
 	case "opencode", "opencode-go":
@@ -2873,7 +3210,9 @@ func loadSessions(pid string) []SessionRecord {
 
 func saveSessions(pid string, list []SessionRecord) {
 	b, _ := json.MarshalIndent(list, "", "  ")
-	os.WriteFile(getSessionFilePath(pid), b, 0644)
+	if err := writeFileAtomic(getSessionFilePath(pid), b, 0644); err != nil {
+		log.Printf("sessions: write: %v", err)
+	}
 }
 
 func loadMessages(pid, sid string) []SessionMsg {
@@ -2888,8 +3227,15 @@ func loadMessages(pid, sid string) []SessionMsg {
 
 func saveMessages(pid, sid string, list []SessionMsg) {
 	b, _ := json.MarshalIndent(list, "", "  ")
-	os.WriteFile(getMessagesFilePath(pid, sid), b, 0644)
+	if err := writeFileAtomic(getMessagesFilePath(pid, sid), b, 0644); err != nil {
+		log.Printf("messages: write: %v", err)
+	}
 }
+
+// idRe restricts ids that end up in data-dir file names.
+var idRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]*$`)
+
+func validID(s string) bool { return idRe.MatchString(s) && !strings.Contains(s, "..") }
 
 // subscriptionToken resolves the stored token for a subscription provider.
 func subscriptionToken(authData map[string]interface{}, providerID string) string {
@@ -3014,10 +3360,15 @@ func runStandaloneCompletion(pid, sid, asstID, providerID, model, prompt string)
 	reply := executeAICall(providerID, cloudTokenFor(providerID), model, prompt)
 	compTime := time.Now().UnixMilli()
 
+	sessMu.Lock()
+	defer sessMu.Unlock()
 	all := loadMessages(pid, sid)
 	for i := range all {
 		if all[i].Info.ID == asstID {
 			all[i].Parts = []MsgPart{{Type: "text", Text: reply}}
+			if all[i].Info.Time == nil {
+				all[i].Info.Time = map[string]interface{}{}
+			}
 			all[i].Info.Time["completed"] = compTime
 			all[i].Info.Tokens = map[string]interface{}{
 				"input":  len(prompt) / 4,
@@ -3049,6 +3400,10 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 	}
 	pid := parts[0]
 	rest := "/" + strings.Join(parts[1:], "/")
+	if !validID(pid) {
+		writeErr(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
 
 	// 1. Forward to a running local OpenCode instance when available.
 	inst, err := instMgr.Get(pid)
@@ -3059,6 +3414,13 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadGateway, "opencode instance unreachable")
 		}
 		r.URL.Path = rest
+		r.URL.RawPath = ""
+		// Do not leak the daemon's own credentials to the engine.
+		r.Header.Del("Authorization")
+		if q := r.URL.Query(); q.Has("token") {
+			q.Del("token")
+			r.URL.RawQuery = q.Encode()
+		}
 		r.Host = fmt.Sprintf("127.0.0.1:%d", inst.Port)
 		proxy.ServeHTTP(w, r)
 		return
@@ -3089,6 +3451,12 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if action == "session" {
+		if len(parts) >= 3 && !validID(parts[2]) {
+			writeErr(w, http.StatusBadRequest, "invalid session id")
+			return
+		}
+		sessMu.Lock()
+		defer sessMu.Unlock()
 		switch {
 		case len(parts) == 2 && r.Method == http.MethodGet:
 			writeJSON(w, http.StatusOK, loadSessions(pid))
@@ -3193,7 +3561,7 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusOK, blob{"ok": true, "sessionID": sid})
 				return
 			}
-			if parts[3] == "abort" && r.Method == http.MethodPost {
+			if len(parts) >= 4 && parts[3] == "abort" && r.Method == http.MethodPost {
 				writeErr(w, http.StatusServiceUnavailable, noEngine)
 				return
 			}
