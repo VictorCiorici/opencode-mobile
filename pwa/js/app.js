@@ -185,6 +185,8 @@ async function loadProjects(keep = true) {
     `<option value="">– select project –</option>` +
     S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
   if (!S.projects.find((p) => p.id === S.pid)) { S.sid = null; if (!keep || S.projects.length) S.pid = null; }
+  // A single project is the obvious choice — don't make the user pick it.
+  if (!S.pid && S.projects.length === 1) switchProject(S.projects[0].id);
   if (S.pid) sel.value = S.pid;
   renderProjectList();
   updateChatHeader();
@@ -558,8 +560,12 @@ function updateCtxBar(msgs) {
 async function checkPermissions() {
   if (!S.pid || !S.sid) return;
   try {
-    const res = await oc(`/session/${S.sid}/permission`).catch(() => []);
-    const perms = Array.isArray(res) ? res : (res?.permissions || []);
+    // opencode 1.x lists pending requests globally at GET /permission.
+    const sid = S.sid;
+    const res = await oc(`/permission`).catch(() => []);
+    if (sid !== S.sid) return;
+    const perms = (Array.isArray(res) ? res : (res?.permissions || []))
+      .filter((p) => !p.sessionID || p.sessionID === sid);
     renderPermissions(perms);
   } catch {}
 }
@@ -571,20 +577,21 @@ function renderPermissions(perms) {
   for (const p of perms) {
     const card = document.createElement("div");
     card.className = "perm-card";
-    const desc = p.command || p.path || p.description || p.title || JSON.stringify(p.params || p);
+    const desc = (p.patterns && p.patterns.length ? p.patterns.join(" · ") : "") ||
+      p.metadata?.command || p.command || p.path || p.description || p.title || JSON.stringify(p.metadata || p);
     card.innerHTML = `
-      <div class="perm-title"><span>🛡️ Permission Request (${esc(p.type || "action")})</span></div>
+      <div class="perm-title"><span>🛡️ Permission Request (${esc(p.permission || p.type || "action")})</span></div>
       <div class="perm-desc"><code>${esc(desc)}</code></div>
       <div class="perm-btns">
-        <button class="primary" data-resp="allow">Allow</button>
-        <button class="ghost" data-resp="allow_session">Always for session</button>
-        <button class="ghost danger" data-resp="deny">Deny</button>
+        <button class="primary" data-resp="once">Allow</button>
+        <button class="ghost" data-resp="always">Always allow</button>
+        <button class="ghost danger" data-resp="reject">Deny</button>
       </div>`;
     card.querySelectorAll("button").forEach((b) => {
       b.onclick = async () => {
         const resp = b.dataset.resp;
         try {
-          await oc(`/session/${S.sid}/permission/${p.id}`, {
+          await oc(`/session/${encodeURIComponent(p.sessionID || S.sid)}/permissions/${encodeURIComponent(p.id)}`, {
             method: "POST",
             body: { response: resp },
           });
@@ -694,7 +701,7 @@ async function sendPrompt(text, retryOf = false) {
     const paint = (m) => {
       const html = (m.parts || []).map(partHtml).join("");
       live.className = "msg assistant";
-      live.innerHTML = `<span class="role">assistant</span>${html || "<span class='thinking'>…</span>"}`;
+      live.innerHTML = html || "<span class='thinking'>…</span>";
       if (m.info?.tokens) {
         const t = m.info.tokens;
         const ctx = (t.input || 0) + (t.cache?.read || 0) + (t.cache?.write || 0);
@@ -1266,7 +1273,7 @@ function showActions(title, actions) {
 }
 
 async function loadGit() {
-  if (!S.pid) { toast("Open a project first", true); return; }
+  if (!S.pid) { $("#git-branch").textContent = "–"; renderNoProject($("#git-files")); return; }
   try {
     const gpid = S.pid;
     const gl = $("#git-files");
@@ -2035,8 +2042,16 @@ function syncEditorToProject() {
 }
 
 let filesSeq = 0;
+/* Inline empty state for project-scoped lists (instead of an error toast). */
+function renderNoProject(ul) {
+  ul.innerHTML = `<li class="empty-state empty-state-card">No project open
+    <button class="ghost" data-goto-projects>Choose a project</button></li>`;
+  ul.querySelector("[data-goto-projects]").addEventListener("click", () =>
+    document.querySelector('[data-view="projects"]').click());
+}
+
 async function loadFiles(path = "") {
-  if (!S.pid) { toast("Open a project first", true); return; }
+  if (!S.pid) { renderNoProject($("#file-list")); return; }
   const seq = ++filesSeq, pid = S.pid;
   const ul = $("#file-list");
   ul.innerHTML = `<li class="empty-state">Loading…</li>`;

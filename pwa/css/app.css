@@ -218,8 +218,9 @@ body.hide-meta .msg-meta { display: none; }
   background: linear-gradient(135deg, var(--accent), var(--accent2)); }
 
 /* ---------- git ---------- */
-.git-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.git-btns { display: flex; gap: 6px; }
+.git-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.git-head #git-branch { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; }
 .git-btns button { padding: 7px 12px; font-size: 13px; }
 .tabs-sub { display: flex; gap: 6px; margin-bottom: 10px; }
 .subtab { flex: 1; padding: 8px; background: var(--surface); border: 1px solid var(--border); }
@@ -438,12 +439,14 @@ button.danger { border-color: var(--err); color: var(--err); }
 /* ---------- message actions ---------- */
 .msg-wrap { position: relative; display: flex; flex-direction: column; }
 .msg-wrap:hover .msg-more-btn, .msg-wrap:focus-within .msg-more-btn { opacity: 1; }
+/* Sits in its own row under the bubble (never over the text), aligned to the
+   bubble's side. */
 .msg-more-btn {
-  position: absolute; top: 4px; right: 4px; opacity: .4; background: var(--surface2);
-  border: 1px solid var(--border); border-radius: 8px; padding: 2px 6px; font-size: 11px;
+  align-self: flex-start; margin: -6px 0 2px 4px; opacity: .55; background: transparent;
+  border: none; border-radius: 8px; padding: 0 10px; font-size: 16px; line-height: 1;
   color: var(--muted); cursor: pointer; transition: opacity .15s ease;
 }
-.msg.user + .msg-more-btn { right: auto; left: 4px; }
+.msg.user + .msg-more-btn { align-self: flex-end; margin: -6px 4px 2px 0; }
 
 /* ---------- git conflicts ---------- */
 .conflict-card { border-color: var(--err); margin-bottom: 10px; }
@@ -477,7 +480,7 @@ button.sm { padding: 4px 10px; font-size: 12px; }
 .check input { width: 22px; height: 22px; min-height: 0; }
 .list li { min-height: var(--tap); }
 .chip { display: inline-flex; align-items: center; padding: 4px 12px; font-family: inherit; font-weight: 500; }
-.msg-more-btn { min-width: var(--tap); min-height: 32px; top: 0; }
+.msg-more-btn { min-width: var(--tap); min-height: 32px; }
 .nowrap { white-space: nowrap; }
 .narrow { max-width: 120px; }
 

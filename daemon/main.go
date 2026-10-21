@@ -606,9 +606,20 @@ func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
 	m.nextPort++
 	cmd := engineCommand(opencodeBin, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
 	cmd.Dir = dir
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// Keep the engine's own output: without it a failed start is invisible.
+	var logf *os.File
+	if cfg.DataDir != "" && validID(strings.TrimPrefix(pid, "__")) {
+		_ = os.MkdirAll(filepath.Join(cfg.DataDir, "logs"), 0o755)
+		logf, _ = os.OpenFile(filepath.Join(cfg.DataDir, "logs", "engine-"+pid+".log"),
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	}
+	if logf != nil {
+		cmd.Stdout, cmd.Stderr = logf, logf
+	}
 	if err := cmd.Start(); err != nil {
+		if logf != nil {
+			logf.Close()
+		}
 		return nil, fmt.Errorf("failed to start opencode for '%s': %w", pid, err)
 	}
 	inst := &Instance{
@@ -621,7 +632,14 @@ func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
 		exited:   make(chan struct{}),
 	}
 	m.instances[pid] = inst
-	go func() { cmd.Wait(); close(inst.exited) }()
+	go func() {
+		err := cmd.Wait()
+		if logf != nil {
+			logf.Close()
+		}
+		log.Printf("engine for %q on :%d exited: %v", pid, port, err)
+		close(inst.exited)
+	}()
 	return inst, nil
 }
 
@@ -3421,6 +3439,9 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Forward to a running local OpenCode instance when available.
 	inst, err := instMgr.Get(pid)
+	if err != nil && !errors.Is(err, ErrNoEngine) {
+		log.Printf("opencode engine unavailable for %q: %v", pid, err)
+	}
 	if err == nil && inst != nil && isPortHealthy(inst.Port) {
 		target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
 		proxy := httputil.NewSingleHostReverseProxy(target)
