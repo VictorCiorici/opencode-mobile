@@ -5,6 +5,11 @@ on:
   push:
   pull_request:
 
+env:
+  # Engine pinned to the release verified on-device. "latest" drifts: newer
+  # lines (opencode 2.x) serve a different, password-protected API under /api.
+  OPENCODE_VERSION: v1.18.25
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,7 +49,7 @@ jobs:
           # clone3(435), which Android's app seccomp policy SIGSYS-kills
           # (RET_KILL outranks any stacked ERRNO shim, so glibc builds
           # cannot run in-process at all).
-          curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64-musl.tar.gz -o /tmp/oc.tar.gz
+          curl -fsSL https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-arm64-musl.tar.gz -o /tmp/oc.tar.gz
           tar -xzf /tmp/oc.tar.gz -C /tmp/oc
           BIN=$(find /tmp/oc -type f -name opencode | head -1)
           test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }

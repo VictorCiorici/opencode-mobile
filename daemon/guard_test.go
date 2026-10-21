@@ -124,3 +124,18 @@ func TestGitRemoteAddSetURLRemove(t *testing.T) {
 		t.Fatalf("remote not removed: %#v", rs)
 	}
 }
+
+func TestOpenCodeProxyRejectsHTMLFromIncompatibleEngine(t *testing.T) {
+	resp := &http.Response{Header: http.Header{"Content-Type": {"text/html; charset=utf-8"}}, Body: http.NoBody}
+	if err := rejectHTMLEngineResponse(resp); err != errEngineIncompatible {
+		t.Fatalf("html: got %v", err)
+	}
+	resp = &http.Response{Header: http.Header{"Content-Type": {"application/json"}}, Body: http.NoBody}
+	if err := rejectHTMLEngineResponse(resp); err != nil {
+		t.Fatalf("json: got %v", err)
+	}
+	resp = &http.Response{Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: http.NoBody}
+	if err := rejectHTMLEngineResponse(resp); err != nil {
+		t.Fatalf("sse: got %v", err)
+	}
+}

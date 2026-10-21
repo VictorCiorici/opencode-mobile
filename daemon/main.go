@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -3390,6 +3391,19 @@ func readAuthJSONViaPath(path string) map[string]interface{} {
 	return authData
 }
 
+var errEngineIncompatible = errors.New("the opencode engine answered with its web app instead of the API — this engine version is not API-compatible (OpenForge needs opencode 1.x)")
+
+// rejectHTMLEngineResponse turns an HTML page from the engine into a clear
+// error: opencode 2.x serves its web UI on the 1.x API routes, which the PWA
+// would otherwise report as an opaque "received HTML instead of JSON".
+func rejectHTMLEngineResponse(resp *http.Response) error {
+	if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		resp.Body.Close()
+		return errEngineIncompatible
+	}
+	return nil
+}
+
 func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 	cleanPath := strings.TrimPrefix(r.URL.Path, "/api/oc/")
 	cleanPath = strings.TrimPrefix(cleanPath, "/oc/")
@@ -3410,7 +3424,12 @@ func handleOpenCode(w http.ResponseWriter, r *http.Request) {
 	if err == nil && inst != nil && isPortHealthy(inst.Port) {
 		target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
 		proxy := httputil.NewSingleHostReverseProxy(target)
+		proxy.ModifyResponse = rejectHTMLEngineResponse
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, perr error) {
+			if errors.Is(perr, errEngineIncompatible) {
+				writeErr(w, http.StatusBadGateway, perr.Error())
+				return
+			}
 			writeErr(w, http.StatusBadGateway, "opencode instance unreachable")
 		}
 		r.URL.Path = rest
