@@ -6,7 +6,7 @@
 //
 // No model is called, so it needs no API keys.
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,9 @@ const { values: opt } = parseArgs({
     chrome: { type: "string" },
     port: { type: "string", default: "18787" },
     shots: { type: "string" },
+    // Also chat with opencode's free default model and approve a tool call.
+    // Needs network access but no API keys.
+    chat: { type: "boolean", default: false },
   },
 });
 for (const k of ["daemon", "opencode", "chrome"]) {
@@ -87,6 +90,11 @@ check((await api("/api/browse")).status === 200, "token is accepted");
 const created = await api("/api/projects", { method: "POST", body: { name: "smoke", git_init: true } });
 check(created.status === 200 && !!created.json?.id, `project created (${created.status})`);
 const pid = created.json?.id;
+const projPath = created.json?.path;
+if (opt.chat && projPath) {
+  // Make file edits ask first, so the chat check exercises the approval flow.
+  writeFileSync(join(projPath, "opencode.json"), JSON.stringify({ permission: { edit: "ask", bash: "ask" } }));
+}
 
 // The engine proxy must return JSON. An incompatible engine (opencode 2.x)
 // serves HTML here, which the daemon turns into a 502.
@@ -166,6 +174,38 @@ for (const v of ["chat", "projects", "files", "git", "models", "settings"]) {
   await shot(String(n++).padStart(2, "0") + "-" + v);
   const visible = await evalJs(`(() => { const el = document.getElementById('view-${v}'); return !!el && el.offsetParent !== null && el.innerText.trim().length > 0; })()`);
   check(visible, `${v} view renders content`);
+}
+
+if (opt.chat) {
+  const waitFor = async (expr, ms) => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(1000)) {
+      if (await evalJs(expr)) return true;
+    }
+    return false;
+  };
+  await evalJs(`document.querySelector('[data-view="chat"]').click()`);
+  await sleep(1500);
+  await evalJs(`(() => {
+    const t = document.querySelector('#chat-input');
+    t.value = "Use your write tool to create a file named smoke.txt containing exactly the text: ok. Do nothing else.";
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#chat-send').click();
+  })()`);
+  const asked = await waitFor(`!!document.querySelector('#perm-container .perm-card')`, 180000);
+  await shot(String(n++).padStart(2, "0") + "-permission");
+  check(asked, "the model's file write asks for approval in the UI");
+  if (asked) {
+    await evalJs(`document.querySelector('#perm-container .perm-card [data-resp="once"]').click()`);
+    let written = false;
+    for (const end = Date.now() + 120000; !written && Date.now() < end; await sleep(1000)) {
+      try { written = readFileSync(join(projPath, "smoke.txt"), "utf8").includes("ok"); } catch {}
+    }
+    check(written, "approving it lets the engine write the file");
+    check(await waitFor(`!document.querySelector('#perm-container .perm-card')`, 10000), "the approval card goes away");
+  }
+  check(await waitFor(`document.querySelector('#chat-send').textContent.includes('➤')`, 120000), "the reply finishes");
+  check(await evalJs(`document.querySelectorAll('#chat-messages .msg.assistant').length > 0`), "the reply is shown");
+  await shot(String(n++).padStart(2, "0") + "-chat-done");
 }
 
 check((await evalJs(`typeof window.OpenForgeBack`)) === "function", "Android back hook is installed");

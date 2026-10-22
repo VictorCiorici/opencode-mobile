@@ -219,6 +219,15 @@ jobs:
           node e2e/smoke.mjs --daemon /tmp/openforge-daemon --opencode "$OPENCODE_BIN" \
             --chrome "$(command -v google-chrome || command -v chromium)" --shots /tmp/shots
 
+      - name: Chat and tool-approval round-trip (free model)
+        # Uses opencode's free default model over the network, which can be
+        # slow or rate-limited, so it reports but never fails the build.
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          node e2e/smoke.mjs --chat --daemon /tmp/openforge-daemon --opencode "$OPENCODE_BIN" \
+            --chrome "$(command -v google-chrome || command -v chromium)" --shots /tmp/shots/chat
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

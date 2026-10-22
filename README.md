@@ -99,6 +99,7 @@ cd android && gradle testDebugUnitTest
 # Chrome at phone size. No model is called, so no API keys are needed.
 (cd daemon && go build -o /tmp/openforge-daemon .)
 node e2e/smoke.mjs --daemon /tmp/openforge-daemon --opencode <opencode v1.19.x> --chrome <chrome>
+# Add --chat to also chat with opencode's free model and approve a file write.
 ```
 CI builds the ARM64 daemon, runs all suites including the smoke test, and uploads the APK on every push and pull request.
 

@@ -3,7 +3,7 @@
    - API / bridge traffic is NEVER touched or cached: only GET requests for files
      inside this worker's own scope (the /ui/ folder) are handled at all.
    - Bump CACHE whenever the shell changes: activate() drops every other cache. */
-const CACHE = "openforge-v5";
+const CACHE = "openforge-v6";
 const SHELL = [
   "./", "index.html", "css/app.css", "js/util.js", "js/app.js",
   "manifest.webmanifest", "icons/icon.svg",
