@@ -20,8 +20,18 @@ public class RuntimeInstaller {
             targetDir.mkdirs();
         }
         try {
-            copyAssetFolder(context.getAssets(), "web", new File(targetDir, "pwa"));
-            copyAssetFolder(context.getAssets(), "bin", new File(targetDir, "bin"));
+            // Each step is independent: a failure copying one asset (e.g. the
+            // daemon binary is busy) must not skip the engine runtime below.
+            try {
+                copyAssetFolder(context.getAssets(), "web", new File(targetDir, "pwa"));
+            } catch (IOException e) {
+                Log.w(TAG, "Copying web assets failed", e);
+            }
+            try {
+                copyAssetFolder(context.getAssets(), "bin", new File(targetDir, "bin"));
+            } catch (IOException e) {
+                Log.w(TAG, "Copying bin assets failed", e);
+            }
 
             // Check for zipped runtime bundle (e.g., runtime-arm64.zip).
             // Extraction is skipped when the bundle is unchanged (same entry
@@ -89,8 +99,13 @@ public class RuntimeInstaller {
         try (ZipInputStream zis = new ZipInputStream(is)) {
             ZipEntry entry;
             byte[] buffer = new byte[8192];
+            String root = targetDir.getCanonicalPath() + File.separator;
             while ((entry = zis.getNextEntry()) != null) {
                 File file = new File(targetDir, entry.getName());
+                // Zip Slip guard: entries like "../x" must stay inside targetDir.
+                if (!file.getCanonicalPath().startsWith(root)) {
+                    throw new IOException("Zip entry escapes target dir: " + entry.getName());
+                }
                 if (entry.isDirectory()) {
                     file.mkdirs();
                 } else {
@@ -145,13 +160,20 @@ public class RuntimeInstaller {
         if (toFile.getParentFile() != null && !toFile.getParentFile().exists()) {
             toFile.getParentFile().mkdirs();
         }
+        // Write to a sibling temp file and rename: overwriting an executable
+        // that is currently running fails with ETXTBSY, a rename does not.
+        File tmp = new File(toFile.getPath() + ".tmp");
         try (InputStream in = assetManager.open(fromAssetPath);
-             OutputStream out = new FileOutputStream(toFile)) {
+             OutputStream out = new FileOutputStream(tmp)) {
             byte[] buffer = new byte[8192];
             int read;
             while ((read = in.read(buffer)) != -1) {
                 out.write(buffer, 0, read);
             }
+        }
+        if (!tmp.renameTo(toFile)) {
+            tmp.delete();
+            throw new IOException("Could not replace " + toFile);
         }
     }
 }

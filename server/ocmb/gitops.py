@@ -3,22 +3,67 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import subprocess
+import sys
+
+# Never block on an interactive credential prompt; fail instead.
+_GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+NETWORK_TIMEOUT = 300.0
+DEFAULT_TIMEOUT = 60.0
+_NETWORK_CMDS = ("push", "pull", "fetch", "clone")
 
 
 class GitError(Exception):
     pass
 
 
-async def _run(pid_path: str, *args: str) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args,
-        cwd=pid_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    out, err = await proc.communicate()
+async def _kill(proc, tree: bool = False) -> None:
+    """Kill a subprocess (and, for shell commands, its children)."""
+    try:
+        if tree and sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10)
+        elif tree:
+            os.killpg(proc.pid, signal.SIGKILL)  # started with start_new_session
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except Exception:
+        pass
+
+
+async def _run(pid_path: str, *args: str, timeout: float | None = None) -> str:
+    if timeout is None:
+        timeout = NETWORK_TIMEOUT if args and args[0] in _NETWORK_CMDS else DEFAULT_TIMEOUT
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args,
+            cwd=pid_path,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **_GIT_ENV},
+        )
+    except OSError as e:  # git missing, or project folder gone
+        raise GitError(f"cannot run git: {e}")
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        await _kill(proc)
+        raise GitError(f"git {args[0] if args else ''} timed out after {timeout:g}s")
+    except asyncio.CancelledError:
+        await _kill(proc)
+        raise
     if proc.returncode != 0:
-        raise GitError(err.decode(errors="replace").strip() or f"git {args[0]} failed")
+        msg = err.decode(errors="replace").strip() or out.decode(errors="replace").strip()
+        raise GitError(msg or f"git {args[0]} failed")
     return out.decode(errors="replace")
 
 
@@ -50,6 +95,21 @@ def _git_rel(root: str, rel: str) -> str:
     return out
 
 
+def _safe_name(name: str) -> str:
+    """Remote names: plain identifiers, never option-like."""
+    name = (name or "").strip()
+    if not name or name.startswith("-") or any(c.isspace() or c in ":^~\\?*[" for c in name):
+        raise GitError(f"invalid name: {name!r}")
+    return name
+
+
+def _safe_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url or url.startswith("-") or any(c in url for c in "\r\n\0"):
+        raise GitError("invalid url")
+    return url
+
+
 def _safe_ref(ref: str) -> str:
     ref = (ref or "").strip()
     if not ref or ref.startswith("-") or any(c.isspace() for c in ref) or "^" in ref or "~" in ref or ":" in ref:
@@ -72,6 +132,7 @@ async def init_repo(path: str, branch: str = "main") -> str:
 async def status(path: str) -> dict:
     empty = {
         "is_git": False,
+        "clean": True,
         "branch": "",
         "staged": [],
         "unstaged": [],
@@ -79,7 +140,7 @@ async def status(path: str) -> dict:
         "conflicts": [],
         "has_conflicts": False,
     }
-    if not os.path.isdir(os.path.join(path, ".git")):
+    if not os.path.exists(os.path.join(path, ".git")):
         return empty
     try:
         porcelain = await _run(path, "status", "--porcelain=v1", "-b")
@@ -87,7 +148,7 @@ async def status(path: str) -> dict:
         return empty
     staged, unstaged, untracked, conflicts = [], [], [], []
     for line in porcelain.splitlines():
-        if not line.strip() or line.startswith("#"):
+        if len(line) < 4 or line.startswith("##"):
             continue
         x, y, name = line[0], line[1], line[3:].strip()
         entry = {"x": x, "y": y, "path": name}
@@ -95,13 +156,21 @@ async def status(path: str) -> dict:
             conflicts.append(entry)
         elif x == "?":
             untracked.append(entry)
-        elif x not in (" ", "?"):
-            staged.append(entry)
-        elif y != " ":
-            unstaged.append(entry)
-    branch = porcelain.splitlines()[0][2:] if porcelain else ""
+        else:
+            # "MM" etc. appear in both lists (staged change + further edits).
+            if x != " ":
+                staged.append(entry)
+            if y != " ":
+                unstaged.append(entry)
+    branch = ""
+    first = porcelain.splitlines()[0] if porcelain else ""
+    if first.startswith("## "):
+        branch = first[3:].split("...", 1)[0].strip()
+        if branch.startswith("No commits yet on "):
+            branch = branch[len("No commits yet on "):]
     return {
         "is_git": True,
+        "clean": not (staged or unstaged or untracked or conflicts),
         "branch": branch,
         "staged": staged,
         "unstaged": unstaged,
@@ -148,7 +217,12 @@ async def unstage(path: str, files: list[str] | None) -> None:
 
 
 async def commit(path: str, message: str) -> str:
-    await stage(path, None)
+    if not (message or "").strip():
+        raise GitError("commit message required")
+    # Respect the staging area; only stage everything when nothing is staged
+    # (the PWA asks the user to confirm that case).
+    if not (await _run(path, "diff", "--cached", "--name-only")).strip():
+        await stage(path, None)
     out = await _run(path, "commit", "-m", message)
     return out.strip()[:400]
 
@@ -286,6 +360,17 @@ async def revert_commit(path: str, ref: str) -> str:
     return (await _run(path, "revert", "--no-edit", _safe_ref(ref))).strip() or f"reverted {ref[:8]}"
 
 
+def _strip_userinfo(url: str) -> str:
+    """Never echo credentials embedded in a remote URL (https://user:token@host/...)."""
+    if "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    host_part, sep, tail = rest.partition("/")
+    if "@" in host_part:
+        host_part = host_part.rsplit("@", 1)[1]
+    return f"{scheme}://{host_part}{sep}{tail}"
+
+
 async def remotes(path: str) -> list[dict]:
     out = await _run(path, "remote", "-v")
     seen: dict[str, dict] = {}
@@ -294,64 +379,79 @@ async def remotes(path: str) -> list[dict]:
         if len(parts) >= 2:
             r = seen.setdefault(parts[0], {"name": parts[0], "fetch": None, "push": None})
             if "(fetch)" in line:
-                r["fetch"] = parts[1]
+                r["fetch"] = _strip_userinfo(parts[1])
             elif "(push)" in line:
-                r["push"] = parts[1]
+                r["push"] = _strip_userinfo(parts[1])
     return list(seen.values())
 
 
 async def remote_add(path: str, name: str, url: str) -> str:
-    out = await _run(path, "remote", "add", name, url)
+    out = await _run(path, "remote", "add", _safe_name(name), _safe_url(url))
     return out.strip() or f"remote {name} added"
 
 
 async def remote_set_url(path: str, name: str, url: str) -> str:
-    out = await _run(path, "remote", "set-url", name, url)
+    out = await _run(path, "remote", "set-url", _safe_name(name), _safe_url(url))
     return out.strip() or f"remote {name} updated"
 
 
 async def remote_remove(path: str, name: str) -> str:
-    out = await _run(path, "remote", "remove", name)
+    out = await _run(path, "remote", "remove", _safe_name(name))
     return out.strip() or f"remote {name} removed"
 
 
 async def fetch(path: str, remote: str = "origin") -> str:
-    out = await _run(path, "fetch", _safe_ref(remote))
+    out = await _run(path, "fetch", _safe_name(remote))
     return out.strip() or f"fetched from {remote}"
 
 
 async def resolve_conflict(path: str, file_rel: str, choice: str = "ours") -> str:
     rel = _git_rel(path, file_rel)
+    if choice not in ("ours", "theirs"):
+        raise GitError("choice must be 'ours' or 'theirs'")
     flag = "--ours" if choice == "ours" else "--theirs"
     await _run(path, "checkout", flag, "--", rel)
     await stage(path, [rel])
     return f"resolved {rel} using {choice}"
 
 
+MAX_EXEC_OUTPUT = 1_000_000
+
+
 async def exec_cmd(path: str, command: str, timeout: float = 30.0) -> dict:
-    """Execute a bash command in the project directory."""
+    """Execute a shell command in the project directory.
+
+    This is the explicit terminal feature: the command is run by the shell by
+    design (the caller is authenticated). Timeout is clamped to 1..120s and the
+    process is killed on expiry."""
+    if not (command or "").strip():
+        raise ValueError("command required")
+    if not timeout or timeout <= 0 or timeout > 120:
+        timeout = 30.0
     proc = await asyncio.create_subprocess_shell(
         command,
         cwd=path,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=(sys.platform != "win32"),
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return {
             "ok": proc.returncode == 0,
             "code": proc.returncode,
-            "stdout": out.decode(errors="replace"),
-            "stderr": err.decode(errors="replace"),
+            "stdout": out[:MAX_EXEC_OUTPUT].decode(errors="replace"),
+            "stderr": err[:MAX_EXEC_OUTPUT].decode(errors="replace"),
         }
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        await _kill(proc, tree=True)
         return {
             "ok": False,
             "code": -1,
             "stdout": "",
-            "stderr": f"Command timed out after {timeout}s",
+            "stderr": f"Command timed out after {timeout:g}s",
         }
+    except asyncio.CancelledError:
+        await _kill(proc, tree=True)
+        raise

@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
+
+from .config import write_private
 
 
 def _config_paths(project_path: str | None) -> list[Path]:
@@ -18,16 +21,30 @@ def _config_paths(project_path: str | None) -> list[Path]:
 def _read(path: Path) -> dict:
     if path.exists():
         try:
-            return json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
         except Exception:
             pass
     return {}
 
 
+def redact(v: Any) -> Any:
+    """Deep copy of a config with apiKey values masked (safe to return over HTTP)."""
+    if isinstance(v, dict):
+        out = {}
+        for k, val in v.items():
+            if k == "apiKey" and isinstance(val, str) and val and val != "local":
+                out[k] = f"{val[:4]}...{val[-4:]}" if len(val) >= 16 else "****"
+            else:
+                out[k] = redact(val)
+        return out
+    if isinstance(v, list):
+        return [redact(x) for x in v]
+    return v
+
+
 def _write(path: Path, cfg: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, indent=2))
-    # Lock down the file if it contains credentials.
+    # 0600 from creation if the file contains credentials.
     has_secret = False
     for prov in (cfg.get("provider") or {}).values():
         try:
@@ -37,10 +54,7 @@ def _write(path: Path, cfg: dict) -> None:
         if isinstance(key, str) and key and key != "local":
             has_secret = True
             break
-    try:
-        os.chmod(path, 0o600 if has_secret else 0o644)
-    except OSError:
-        pass
+    write_private(path, json.dumps(cfg, indent=2), 0o600 if has_secret else 0o644)
 
 
 def add_model(provider_id: str, model_id: str, options: dict | None,
@@ -60,7 +74,7 @@ def add_model(provider_id: str, model_id: str, options: dict | None,
     if set_default:
         cfg["model"] = f"{provider_id}/{model_id}"
     _write(path, cfg)
-    return cfg
+    return redact(cfg)
 
 
 def remove_model(provider_id: str, model_id: str, project_path: str | None = None) -> dict:
@@ -73,7 +87,7 @@ def remove_model(provider_id: str, model_id: str, project_path: str | None = Non
     if cfg.get("model") == f"{provider_id}/{model_id}":
         cfg.pop("model", None)
     _write(path, cfg)
-    return cfg
+    return redact(cfg)
 
 
 def current_default() -> str | None:
@@ -93,7 +107,7 @@ def list_favorites() -> list[str]:
     p = _favorites_path()
     if p.exists():
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):          # {"favorites": [...]} (Go-daemon format)
                 return [str(x) for x in data.get("favorites") or []]
             if isinstance(data, list):          # legacy bare array
@@ -112,11 +126,6 @@ def toggle_favorite(provider_id: str, model_id: str) -> tuple[list[str], bool]:
     else:
         favs.remove(key)
     p = _favorites_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
     # Store the object format shared with the Go daemon.
-    p.write_text(json.dumps({"favorites": favs}))
-    try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+    write_private(p, json.dumps({"favorites": favs}))
     return favs, added

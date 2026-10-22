@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0b0e14">
 <title>OpenForge</title>
 <link rel="manifest" href="manifest.webmanifest">
@@ -10,59 +11,60 @@
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 <header id="topbar">
   <div class="brand"><img src="icons/icon.svg" alt=""><span>OpenForge</span></div>
   <div class="top-actions">
-    <button id="btn-toggle-term" class="ghost term-btn" title="Terminal">📟</button>
-    <select id="project-select" title="Project"></select>
-    <span id="conn-dot" class="dot off"></span>
+    <button id="btn-toggle-term" class="ghost term-btn icon-btn" title="Terminal" aria-label="Open terminal">📟</button>
+    <select id="project-select" title="Project" aria-label="Active project"></select>
+    <span id="conn-dot" class="dot off" role="img" aria-label="Disconnected from daemon"></span>
   </div>
 </header>
 
-<main>
+<main id="main">
   <!-- CHAT -->
   <section id="view-chat" class="view active">
     <div id="perm-container"></div>
-    <div id="chat-scroll"><div id="chat-messages"></div></div>
+    <div id="chat-scroll" role="log" aria-live="polite"><div id="chat-messages"></div></div>
     <div id="session-bar">
       <button id="btn-sessions" class="ghost">Sessions</button>
       <button id="btn-new-session" class="ghost accent">+ New</button>
-      <button id="btn-unrevert" class="ghost hidden" title="Redo reverted turns">↪ Redo</button>
-      <div class="sb-right" title="Tap to change model">
+      <button id="btn-unrevert" class="ghost hidden" title="Redo reverted turns" aria-label="Redo reverted turns">↪ Redo</button>
+      <div class="sb-right" title="Tap to change model" role="button" tabindex="0" aria-label="Change model">
         <span id="ctx-inline"></span>
         <span id="model-label">default</span>
       </div>
     </div>
     <form id="chat-form">
-      <textarea id="chat-input" rows="1" placeholder="Ask opencode… (Enter to send)"></textarea>
-      <button type="submit" id="chat-send">➤</button>
+      <textarea id="chat-input" rows="1" placeholder="Ask opencode… (Enter to send)" aria-label="Message" enterkeyhint="send" autocapitalize="sentences"></textarea>
+      <button type="submit" id="chat-send" aria-label="Send message">➤</button>
     </form>
   </section>
 
   <!-- PROJECTS -->
   <section id="view-projects" class="view">
     <div class="card-row">
-      <input id="new-project-name" placeholder="New project name…">
+      <input id="new-project-name" placeholder="New project name…" aria-label="New project name" autocomplete="off" autocapitalize="none">
       <button id="btn-create-project" class="primary">Create</button>
     </div>
-    <input id="new-project-branch" placeholder="Branch (default: main)" style="margin-bottom:10px">
+    <input id="new-project-branch" placeholder="Branch (default: main)" aria-label="Initial branch" class="mb" autocapitalize="none">
 
-    <div class="card form-col" style="margin-bottom:12px;background:rgba(255,255,255,0.02)">
-      <div class="card-row" style="margin-bottom:6px">
-        <strong style="font-size:13px">📥 Clone from GitHub / Git URL</strong>
+    <div class="card form-col mb tinted">
+      <div class="card-row tight">
+        <strong class="sm-title">📥 Clone from GitHub / Git URL</strong>
       </div>
-      <div class="card-row" style="margin-bottom:6px">
-        <input id="clone-project-url" placeholder="https://github.com/owner/repo.git">
-        <button id="btn-paste-clone-url" class="ghost" style="padding:8px 10px" title="Paste URL">📋</button>
+      <div class="card-row tight">
+        <input id="clone-project-url" placeholder="https://github.com/owner/repo.git" aria-label="Git repository URL" inputmode="url" autocapitalize="none" autocomplete="off">
+        <button id="btn-paste-clone-url" class="ghost icon-btn" title="Paste URL" aria-label="Paste URL from clipboard">📋</button>
       </div>
-      <div class="card-row" style="margin-bottom:0">
-        <input id="clone-project-branch" placeholder="Branch (default: main)" style="max-width:120px">
+      <div class="card-row flush">
+        <input id="clone-project-branch" placeholder="Branch" aria-label="Branch to clone" class="narrow" autocapitalize="none">
         <button id="btn-clone-project" class="primary full">Clone & Open</button>
       </div>
     </div>
 
-    <button id="btn-import-project" class="ghost full import-btn" style="margin-bottom:12px">📂 Import existing folder…</button>
-    <ul id="project-list" class="list"></ul>
+    <button id="btn-import-project" class="ghost full import-btn mb">📂 Import existing folder…</button>
+    <ul id="project-list" class="list" aria-label="Projects"></ul>
   </section>
 
   <!-- GIT -->
@@ -74,7 +76,7 @@
         <button data-git="stash" class="ghost">Stash</button>
         <button data-git="pull" class="ghost">Pull</button>
         <button data-git="push" class="ghost">Push</button>
-        <button data-git="refresh" class="ghost primary-text">↻</button>
+        <button data-git="refresh" class="ghost primary-text" aria-label="Refresh git status">↻</button>
       </div>
     </div>
     <div id="git-remotes" class="remotes"></div>
@@ -89,12 +91,12 @@
     <div id="git-changes" class="subtab-page active">
       <div id="git-conflicts-wrap" class="hidden">
         <div class="card conflict-card">
-          <strong style="color:var(--err)">⚠️ Merge Conflicts Detected</strong>
+          <strong class="err-text">⚠️ Merge Conflicts Detected</strong>
           <div id="git-conflicts-list"></div>
         </div>
       </div>
       <div class="card-row">
-        <input id="commit-msg" placeholder="Commit message…">
+        <input id="commit-msg" placeholder="Commit message…" aria-label="Commit message">
         <button id="btn-commit" class="primary">Commit</button>
       </div>
       <ul id="git-files" class="list"></ul>
@@ -113,7 +115,7 @@
       <div id="diff-file-head" class="card diff-head hidden">
         <strong id="diff-file-name"></strong>
         <label class="check"><input type="checkbox" id="diff-staged-toggle"> staged</label>
-        <button id="diff-close" class="ghost">✕</button>
+        <button id="diff-close" class="ghost icon-btn">✕</button>
       </div>
       <pre id="git-diff-view" class="code-view"></pre>
     </div>
@@ -128,55 +130,55 @@
   <!-- MODELS -->
   <section id="view-models" class="view">
     <!-- Local & LAN Discovery -->
-    <div class="card" style="margin-bottom:12px">
-      <div class="card-row" style="margin-bottom:6px">
-        <strong>📡 Local & LAN AI Servers</strong>
-        <button id="btn-scan-lan" class="primary" style="padding:6px 12px;font-size:12px">🔍 Scan Network</button>
+    <div class="card mb">
+      <div class="card-row tight">
+        <strong>📡 Local &amp; LAN AI Servers</strong>
+        <button id="btn-scan-lan" class="primary compact">🔍 Scan Network</button>
       </div>
-      <p style="color:var(--muted);font-size:12px;margin:0 0 8px">
+      <p class="hint">
         Auto-discover Ollama, LM Studio, or llama.cpp running on this device or local Wi-Fi.
       </p>
-      <div id="lan-scan-status" class="hidden" style="font-size:12px;color:var(--accent);margin-bottom:8px">
+      <div id="lan-scan-status" class="hidden scan-status" role="status">
         <span class="scan-dot">●</span> Scanning local subnet & ports (11434, 1234, 8080, 5000, 8000)…
       </div>
       <div id="lan-servers-list"></div>
-      <div class="card-row" style="margin-top:6px;margin-bottom:0">
-        <input id="lan-custom-host" placeholder="Direct IP (e.g. 192.168.1.50:11434)">
-        <button id="btn-probe-host" class="ghost" style="white-space:nowrap">Probe IP</button>
+      <div class="card-row flush">
+        <input id="lan-custom-host" placeholder="Direct IP (e.g. 192.168.1.50:11434)" aria-label="Direct IP and port" inputmode="url" autocapitalize="none">
+        <button id="btn-probe-host" class="ghost nowrap">Probe IP</button>
       </div>
     </div>
 
-    <details class="card" style="margin-bottom:12px">
+    <details class="card mb">
       <summary>+ Add Custom Model / Provider</summary>
       <div class="form-col" style="margin-top:8px">
-        <div class="branch-chips" style="margin-bottom:4px">
-          <span class="chip" data-preset="ollama">Ollama (127.0.0.1:11434)</span>
-          <span class="chip" data-preset="llamacpp">llama.cpp (:8080)</span>
-          <span class="chip" data-preset="lmstudio">LM Studio (:1234)</span>
-          <span class="chip" data-preset="qwen">Qwen (DashScope)</span>
-          <span class="chip" data-preset="glm">GLM (Zhipu)</span>
+        <div class="branch-chips">
+          <button type="button" class="chip" data-preset="ollama">Ollama (127.0.0.1:11434)</button>
+          <button type="button" class="chip" data-preset="llamacpp">llama.cpp (:8080)</button>
+          <button type="button" class="chip" data-preset="lmstudio">LM Studio (:1234)</button>
+          <button type="button" class="chip" data-preset="qwen">Qwen (DashScope)</button>
+          <button type="button" class="chip" data-preset="glm">GLM (Zhipu)</button>
         </div>
-        <input id="m-provider" placeholder="provider id (e.g. ollama, openai, qwen)">
-        <input id="m-url" placeholder="base URL (e.g. http://127.0.0.1:11434/v1)">
-        <input id="m-model" placeholder="model id (e.g. qwen2.5-coder:7b, deepseek-r1)">
-        <input id="m-name" placeholder="display name (optional)">
-        <input id="m-key" type="password" placeholder="API key (optional for local models)">
+        <input id="m-provider" placeholder="provider id (e.g. ollama, openai, qwen)" aria-label="Provider id" autocapitalize="none">
+        <input id="m-url" placeholder="base URL (e.g. http://127.0.0.1:11434/v1)" aria-label="Base URL" inputmode="url" autocapitalize="none">
+        <input id="m-model" placeholder="model id (e.g. qwen2.5-coder:7b, deepseek-r1)" aria-label="Model id" autocapitalize="none">
+        <input id="m-name" placeholder="display name (optional)" aria-label="Display name">
+        <input id="m-key" type="password" placeholder="API key (optional for local models)" aria-label="API key" autocomplete="off">
         <label class="check"><input type="checkbox" id="m-default"> set as default model</label>
         <button id="btn-add-model" class="primary">Save Model</button>
       </div>
     </details>
 
     <h3 class="sect">Active Models</h3>
-    <div class="card-row"><input id="model-search" placeholder="🔍 Filter models…"></div>
-    <ul id="model-list" class="list"></ul>
+    <div class="card-row"><input id="model-search" placeholder="🔍 Filter models…" aria-label="Filter models" type="search"></div>
+    <ul id="model-list" class="list" aria-label="Models"></ul>
   </section>
 
   <!-- FILES -->
   <section id="view-files" class="view">
-    <div class="crumbs card"><button id="files-up" class="ghost">↑ Up</button><span id="files-path">/</span></div>
+    <div class="crumbs card"><button id="files-up" class="ghost" aria-label="Up one folder">↑ Up</button><span id="files-path">/</span></div>
     <div class="card-row">
-      <input id="file-search" placeholder="🔍 find in current file…">
-      <input id="proj-search" placeholder="🔍 search all files…">
+      <input id="file-search" placeholder="🔍 find in current file…" aria-label="Find in current file" type="search">
+      <input id="proj-search" placeholder="🔍 search all files…" aria-label="Search all files" type="search">
     </div>
     <ul id="proj-search-results" class="list hidden"></ul>
     <ul id="file-list" class="list"></ul>
@@ -185,7 +187,7 @@
       <div class="card-row"><strong id="editor-name"></strong>
         <button id="editor-lsp" class="ghost">LSP</button>
         <button id="editor-close" class="ghost">Close</button></div>
-      <textarea id="editor" spellcheck="false"></textarea>
+      <textarea id="editor" spellcheck="false" aria-label="File editor" autocapitalize="none" autocomplete="off" autocorrect="off"></textarea>
       <button id="editor-save" class="primary full">Save file</button>
     </div>
   </section>
@@ -193,16 +195,16 @@
   <!-- SETTINGS -->
   <section id="view-settings" class="view">
     <details class="fold" open>
-      <summary>⚡ Engine Status<span id="status-models-tag" class="server-badge" style="background:var(--ok);color:#04291a">● 90+ Models Loaded</span></summary>
+      <summary>⚡ Engine Status<span id="status-models-tag" class="server-badge ok">● 90+ Models Loaded</span></summary>
       <div class="fold-body">
-        <div class="card form-col" style="margin-bottom:0;background:rgba(255,255,255,0.03)">
-          <div class="card-row" style="margin-bottom:6px">
-            <span style="font-size:13px">Daemon</span>
-            <span id="status-daemon-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Running (:8787)</span>
+        <div class="card form-col flush tinted">
+          <div class="card-row tight">
+            <span class="sm-title">Daemon</span>
+            <span id="status-daemon-tag" class="server-badge ok">● Running (:8787)</span>
           </div>
-          <div class="card-row" style="margin-bottom:0">
-            <span style="font-size:13px">Engine</span>
-            <span id="status-opencode-tag" class="server-badge" style="background:var(--ok);color:#04291a">● Cloud Zen Engine</span>
+          <div class="card-row flush">
+            <span class="sm-title">Engine</span>
+            <span id="status-opencode-tag" class="server-badge ok">● Cloud Zen Engine</span>
           </div>
         </div>
       </div>
@@ -210,48 +212,48 @@
 
     <details class="fold">
       <summary>🔑 AI Credentials
-        <span id="status-zen-tag" class="server-badge" style="background:var(--muted)">Zen not set</span>
-        <span id="status-go-tag" class="server-badge" style="background:var(--muted)">Go not set</span>
+        <span id="status-zen-tag" class="server-badge off">Zen not set</span>
+        <span id="status-go-tag" class="server-badge off">Go not set</span>
       </summary>
       <div class="fold-body">
-        <div class="card form-col" style="margin-bottom:10px">
-          <div class="card-row" style="margin-bottom:6px">
-            <label style="font-weight:600;font-size:13px">OpenCode Zen Token</label>
-            <span id="auth-tag-opencode" class="server-badge" style="background:var(--muted)">not set</span>
+        <div class="card form-col mb-s">
+          <div class="card-row tight">
+            <label class="lbl">OpenCode Zen Token</label>
+            <span id="auth-tag-opencode" class="server-badge off">not set</span>
           </div>
-          <div class="card-row" style="margin-bottom:0">
+          <div class="card-row flush">
             <input id="key-opencode" type="password" placeholder="zen_live_... (paste token)">
-            <button id="btn-paste-opencode" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-            <button id="btn-save-opencode-key" class="primary" style="white-space:nowrap">Save</button>
+            <button id="btn-paste-opencode" class="ghost icon-btn" title="Paste from Clipboard" aria-label="Paste from clipboard">📋</button>
+            <button id="btn-save-opencode-key" class="primary">Save</button>
           </div>
         </div>
-        <div class="card form-col" style="margin-bottom:10px">
-          <div class="card-row" style="margin-bottom:6px">
-            <label style="font-weight:600;font-size:13px">OpenCode Go Subscription</label>
-            <span id="auth-tag-opencodego" class="server-badge" style="background:var(--muted)">not set</span>
+        <div class="card form-col mb-s">
+          <div class="card-row tight">
+            <label class="lbl">OpenCode Go Subscription</label>
+            <span id="auth-tag-opencodego" class="server-badge off">not set</span>
           </div>
-          <div class="card-row" style="margin-bottom:0">
+          <div class="card-row flush">
             <input id="key-opencodego" type="password" placeholder="OpenCode Go API key (zen/go subscription)">
-            <button id="btn-paste-opencodego" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-            <button id="btn-save-opencodego-key" class="primary" style="white-space:nowrap">Save</button>
+            <button id="btn-paste-opencodego" class="ghost icon-btn" title="Paste from Clipboard" aria-label="Paste from clipboard">📋</button>
+            <button id="btn-save-opencodego-key" class="primary">Save</button>
           </div>
         </div>
-        <div class="card form-col" style="margin-bottom:10px">
-          <div class="card-row" style="margin-bottom:6px">
-            <label style="font-weight:600;font-size:13px">Google Gemini / Antigravity</label>
-            <span id="auth-tag-gemini" class="server-badge" style="background:var(--muted)">not set</span>
+        <div class="card form-col mb-s">
+          <div class="card-row tight">
+            <label class="lbl">Google Gemini / Antigravity</label>
+            <span id="auth-tag-gemini" class="server-badge off">not set</span>
           </div>
-          <div class="card-row" style="margin-bottom:0">
+          <div class="card-row flush">
             <input id="key-gemini" type="password" placeholder="AIzaSy... (Gemini key)">
-            <button id="btn-paste-gemini" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-            <button id="btn-save-gemini-key" class="ghost" style="white-space:nowrap">Save</button>
+            <button id="btn-paste-gemini" class="ghost icon-btn" title="Paste from Clipboard" aria-label="Paste from clipboard">📋</button>
+            <button id="btn-save-gemini-key" class="ghost">Save</button>
           </div>
         </div>
-        <div class="card form-col" style="margin-bottom:0">
-          <div class="card-row" style="margin-bottom:6px">
-            <label style="font-weight:600;font-size:13px">Other Provider Keys (BYOK)</label>
+        <div class="card form-col flush">
+          <div class="card-row tight">
+            <label class="lbl">Other Provider Keys (BYOK)</label>
           </div>
-          <div class="card-row" style="margin-bottom:0">
+          <div class="card-row flush">
             <select id="key-provider-select" style="max-width:100px">
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
@@ -259,35 +261,35 @@
               <option value="glm">GLM</option>
             </select>
             <input id="key-provider-val" type="password" placeholder="API Key">
-            <button id="btn-paste-custom" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-            <button id="btn-save-custom-key" class="ghost" style="white-space:nowrap">Save</button>
+            <button id="btn-paste-custom" class="ghost icon-btn" title="Paste from Clipboard" aria-label="Paste from clipboard">📋</button>
+            <button id="btn-save-custom-key" class="ghost">Save</button>
           </div>
         </div>
       </div>
     </details>
 
     <details class="fold">
-      <summary>🐙 Git & GitHub<span id="auth-tag-github" class="server-badge" style="background:var(--muted)">not set</span></summary>
+      <summary>🐙 Git & GitHub<span id="auth-tag-github" class="server-badge off">not set</span></summary>
       <div class="fold-body">
-        <div class="card form-col" style="margin-bottom:10px">
-          <div class="card-row" style="margin-bottom:6px">
-            <label style="font-weight:600;font-size:13px">GitHub Personal Access Token (PAT)</label>
+        <div class="card form-col mb-s">
+          <div class="card-row tight">
+            <label class="lbl">GitHub Personal Access Token (PAT)</label>
           </div>
-          <div class="card-row" style="margin-bottom:0">
+          <div class="card-row flush">
             <input id="key-github" type="password" placeholder="ghp_... or github_pat_...">
-            <button id="btn-paste-github" class="ghost" style="padding:10px 12px" title="Paste from Clipboard">📋</button>
-            <button id="btn-save-github-token" class="primary" style="white-space:nowrap">Save</button>
+            <button id="btn-paste-github" class="ghost icon-btn" title="Paste from Clipboard" aria-label="Paste from clipboard">📋</button>
+            <button id="btn-save-github-token" class="primary">Save</button>
           </div>
         </div>
-        <div class="card form-col" style="margin-bottom:0">
-          <div class="card-row" style="margin-bottom:6px">
+        <div class="card form-col flush">
+          <div class="card-row tight">
             <input id="git-user-name" placeholder="Git author name (e.g. Victor Ciorici)">
           </div>
-          <div class="card-row" style="margin-bottom:10px">
+          <div class="card-row tight3">
             <input id="git-user-email" placeholder="Git author email (e.g. user@example.com)">
           </div>
           <button id="btn-save-git-identity" class="ghost full">Save Git Author Details</button>
-          <small style="color:var(--muted);margin-top:4px">Used for commit signatures and HTTPS credentials for private repositories.</small>
+          <small class="hint">Used for commit signatures and HTTPS credentials for private repositories.</small>
         </div>
       </div>
     </details>
@@ -295,24 +297,24 @@
     <details class="fold">
       <summary>🔌 Connection & Workspace</summary>
       <div class="fold-body">
-        <div class="card form-col" style="margin-bottom:10px">
-          <div class="card-row" style="margin-bottom:0">
+        <div class="card form-col mb-s">
+          <div class="card-row flush">
             <input id="set-workspace-dir" placeholder="/sdcard/OpenForge/projects">
-            <button id="btn-save-workspace" class="ghost" style="white-space:nowrap">Save</button>
+            <button id="btn-save-workspace" class="ghost">Save</button>
           </div>
-          <small style="color:var(--muted);margin-top:4px">Parent folder where new projects are created automatically with Git.</small>
+          <small class="hint">Parent folder where new projects are created automatically with Git.</small>
         </div>
-        <div class="card form-col" style="margin-bottom:0">
-          <div id="conn-profiles" class="branch-chips" style="margin-bottom:8px"></div>
-          <div class="card-row" style="margin-bottom:8px">
+        <div class="card form-col flush">
+          <div id="conn-profiles" class="branch-chips"></div>
+          <div class="card-row tight2">
             <input id="set-url" placeholder="http://127.0.0.1:8787 (leave empty for local)">
             <button id="btn-save-profile" class="ghost">Save</button>
           </div>
-          <div class="card-row" style="margin-bottom:0">
+          <div class="card-row flush">
             <input id="set-token" type="password" placeholder="Bridge auth token (optional)">
-            <button id="btn-save-token" class="ghost" style="white-space:nowrap">Save</button>
+            <button id="btn-save-token" class="ghost">Save</button>
           </div>
-          <small style="color:var(--muted);margin-top:4px">Connect to a local bridge or remote server over SSH tunnel/Tailscale. If the daemon requires a bearer token (Android app sets it automatically), save it here.</small>
+          <small class="hint">Connect to a local bridge or remote server over SSH tunnel/Tailscale. If the daemon requires a bearer token (Android app sets it automatically), save it here.</small>
         </div>
       </div>
     </details>
@@ -320,7 +322,7 @@
     <details class="fold">
       <summary>🎛️ Preferences</summary>
       <div class="fold-body">
-        <div class="card form-col" style="margin-bottom:10px">
+        <div class="card form-col mb-s">
           <label class="check"><input type="checkbox" id="set-reasoning"> Auto-expand reasoning blocks</label>
           <label class="check"><input type="checkbox" id="set-meta"> Show token usage under messages</label>
           <label class="check"><input type="checkbox" id="set-live-ctx"> Live context updates while generating</label>
@@ -332,35 +334,35 @@
     <details class="fold">
       <summary>ℹ️ About</summary>
       <div class="fold-body">
-        <div id="about-box" class="card about" style="margin-bottom:0"></div>
+        <div id="about-box" class="card about flush"></div>
       </div>
     </details>
   </section>
 
 </main>
 
-<nav id="bottom-nav">
-  <button data-view="chat" class="active"><span>💬</span>Chat</button>
-  <button data-view="projects"><span>📁</span>Projects</button>
-  <button data-view="git"><span>⑂</span>Git</button>
-  <button data-view="models"><span>🧠</span>Models</button>
-  <button data-view="files"><span>📄</span>Files</button>
-  <button data-view="settings"><span>⚙️</span>Settings</button>
+<nav id="bottom-nav" aria-label="Main">
+  <button data-view="chat" class="active" aria-current="page"><span aria-hidden="true">💬</span>Chat</button>
+  <button data-view="projects"><span aria-hidden="true">📁</span>Projects</button>
+  <button data-view="git"><span aria-hidden="true">⑂</span>Git</button>
+  <button data-view="models"><span aria-hidden="true">🧠</span>Models</button>
+  <button data-view="files"><span aria-hidden="true">📄</span>Files</button>
+  <button data-view="settings"><span aria-hidden="true">⚙️</span>Settings</button>
 </nav>
 
-<div id="toast" class="hidden"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <!-- terminal drawer overlay -->
 <div id="term-overlay" class="hidden overlay-dismiss">
-  <div id="term-sheet">
-    <div class="card-row" style="margin-bottom:6px">
+  <div id="term-sheet" class="bottom-sheet" role="dialog" aria-modal="true" aria-label="Project terminal">
+    <div class="card-row tight sheet-head">
       <strong>📟 Project Terminal</strong>
-      <button id="term-clear" class="ghost" style="padding:4px 8px;font-size:12px">Clear</button>
-      <button id="term-close" class="ghost" style="padding:4px 8px;font-size:12px">✕</button>
+      <button id="term-clear" class="ghost compact">Clear</button>
+      <button id="term-close" class="ghost icon-btn" aria-label="Close terminal">✕</button>
     </div>
-    <pre id="term-output" class="code-view" style="max-height:35vh;min-height:120px"></pre>
-    <form id="term-form" class="card-row" style="margin-top:8px;margin-bottom:0">
-      <input id="term-input" placeholder="bash command (e.g. npm test, ls -la)…">
+    <pre id="term-output" class="code-view term-out" aria-live="polite"></pre>
+    <form id="term-form" class="card-row flush term-form">
+      <input id="term-input" placeholder="bash command (e.g. npm test, ls -la)…" aria-label="Terminal command" autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false">
       <button type="submit" class="primary">Run</button>
     </form>
   </div>
@@ -368,9 +370,9 @@
 
 <!-- folder browser overlay -->
 <div id="browser-overlay" class="hidden overlay-dismiss">
-  <div id="browser-sheet">
-    <div class="card-row"><strong>Pick a project folder</strong><button id="browser-close" class="ghost">✕</button></div>
-    <div class="crumbs card"><button id="browser-up" class="ghost">↑ Up</button><span id="browser-path">/</span></div>
+  <div id="browser-sheet" class="bottom-sheet" role="dialog" aria-modal="true" aria-label="Pick a project folder">
+    <div class="card-row sheet-head"><strong>Pick a project folder</strong><button id="browser-close" class="ghost icon-btn" aria-label="Close">✕</button></div>
+    <div class="crumbs card"><button id="browser-up" class="ghost" aria-label="Up one folder">↑ Up</button><span id="browser-path">/</span></div>
     <ul id="browser-list" class="list"></ul>
     <button id="browser-select" class="primary full">Use this folder</button>
   </div>
@@ -378,12 +380,12 @@
 
 <!-- session manager overlay -->
 <div id="session-overlay" class="hidden overlay-dismiss">
-  <div id="browser-sheet">
-    <div class="card-row"><strong>Sessions</strong><button id="session-close" class="ghost">✕</button></div>
-    <div class="git-btns" style="margin-bottom:8px">
+  <div class="bottom-sheet" role="dialog" aria-modal="true" aria-label="Sessions">
+    <div class="card-row sheet-head"><strong>Sessions</strong><button id="session-close" class="ghost icon-btn" aria-label="Close">✕</button></div>
+    <div class="git-btns mb-s">
       <button id="session-new" class="ghost accent">+ New</button>
       <button id="session-todo" class="ghost">Todo list</button>
-      <button id="session-refresh" class="ghost">↻</button>
+      <button id="session-refresh" class="ghost" aria-label="Refresh sessions">↻</button>
     </div>
     <ul id="session-list" class="list"></ul>
   </div>
@@ -391,11 +393,33 @@
 
 <!-- contextual action sheet -->
 <div id="action-overlay" class="hidden overlay-dismiss">
-  <div id="browser-sheet">
-    <div class="card-row"><strong id="action-title"></strong><button id="action-close" class="ghost">✕</button></div>
+  <div class="bottom-sheet" role="dialog" aria-modal="true" aria-labelledby="action-title">
+    <div class="card-row sheet-head"><strong id="action-title"></strong><button id="action-close" class="ghost icon-btn" aria-label="Close">✕</button></div>
     <div id="action-buttons"></div>
   </div>
 </div>
+
+<!-- in-app confirm / prompt dialogs (window.confirm/prompt are unreliable in WebViews) -->
+<div id="confirm-overlay" class="hidden dialog-overlay">
+  <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-msg">
+    <p id="confirm-msg"></p>
+    <div class="dialog-btns">
+      <button id="confirm-cancel" class="ghost">Cancel</button>
+      <button id="confirm-ok" class="danger-solid">Confirm</button>
+    </div>
+  </div>
+</div>
+<div id="prompt-overlay" class="hidden dialog-overlay">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-msg">
+    <p id="prompt-msg"></p>
+    <input id="prompt-input" aria-labelledby="prompt-msg" autocapitalize="none" autocomplete="off" spellcheck="false">
+    <div class="dialog-btns">
+      <button id="prompt-cancel" class="ghost">Cancel</button>
+      <button id="prompt-ok" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+<script src="js/util.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

@@ -3,12 +3,15 @@ name: Build APK
 on:
   workflow_dispatch:
   push:
-    paths:
-      - "android/**"
-      - "pwa/**"
-      - "server/**"
-      - "daemon/**"
-      - ".github/workflows/build-apk.yml"
+  pull_request:
+
+env:
+  # Engine pinned so builds are reproducible. Stay on the 1.x line (GitHub
+  # releases / npm "opencode-ai"): the separate 2.x package (npm
+  # "@opencode/cli") has a different, still experimental API under /api.
+  # v1.18.25 is the last release verified on a device; v1.19.3 exposes the
+  # identical route set and passes e2e/smoke.mjs and a live chat round-trip.
+  OPENCODE_VERSION: v1.19.3
 
 jobs:
   build:
@@ -49,7 +52,7 @@ jobs:
           # clone3(435), which Android's app seccomp policy SIGSYS-kills
           # (RET_KILL outranks any stacked ERRNO shim, so glibc builds
           # cannot run in-process at all).
-          curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64-musl.tar.gz -o /tmp/oc.tar.gz
+          curl -fsSL https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-arm64-musl.tar.gz -o /tmp/oc.tar.gz
           tar -xzf /tmp/oc.tar.gz -C /tmp/oc
           BIN=$(find /tmp/oc -type f -name opencode | head -1)
           test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }
@@ -57,17 +60,77 @@ jobs:
           # musl loader + C++ runtime from Alpine (all land in bin/ next to
           # the engine; the daemon invokes ld-musl with --library-path bin).
           ALPINE=https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64
-          fetch() { # fetch <apk-name> <file...>
+          fetch() { # fetch <apk-name> <soname...>
             local apk="$1"; shift
             curl -fsSL "$ALPINE/$apk" -o /tmp/pkg.apk
             rm -rf /tmp/pkgx && mkdir -p /tmp/pkgx && tar -xzf /tmp/pkg.apk -C /tmp/pkgx
             for f in "$@"; do
-              find /tmp/pkgx -type f -name "$f" -exec cp {} /tmp/rt/bin/ \;
+              # Alpine ships versioned .so files (e.g. libstdc++.so.6.0.32)
+              # plus a SONAME symlink; find the real file and copy it under
+              # the SONAME (libstdc++.so.6) the musl loader actually resolves.
+              src=$(find /tmp/pkgx -type f -name "${f}*" | head -1)
+              if [ -n "$src" ]; then
+                cp "$src" "/tmp/rt/bin/$f"
+              else
+                echo "WARN: $f not found in $apk"
+              fi
             done
           }
           fetch musl-1.2.4_git20230717-r6.apk ld-musl-aarch64.so.1
           fetch 'libstdc++-13.2.1_git20231014-r0.apk' libstdc++.so.6
           fetch libgcc-13.2.1_git20231014-r0.apk libgcc_s.so.1
+
+          # git (Alpine, musl-linked) so the app has a working VCS without a
+          # system git. It runs through the same musl loader as the engine.
+          # Resolve exact apk filenames from the Alpine index (v3.19 is stable,
+          # but this avoids hardcoding versions).
+          ALPIDX=$(curl -fsSL "$ALPINE/APKINDEX.tar.gz" | tar -xzf - -O APKINDEX)
+          apkurl() {  # apkurl <pkg> -> URL for <pkg>-<ver>.apk
+            local p="$1"
+            local v=$(printf '%s' "$ALPIDX" | grep -A12 "^P:$p\$" | grep -m1 '^V:' | sed 's/^V://')
+            echo "$ALPINE/$p-$v.apk"
+          }
+          apkso() {  # apkso <pkg...>: copy every .so* from each apk into bin/,
+            # creating the SONAME symlink (apks don't ship it; it's made at
+            # ldconfig time) so the musl loader can resolve the library. Apks
+            # that DO ship the SONAME as a symlink are copied as-is.
+            for p in "$@"; do
+              curl -fsSL "$(apkurl "$p")" -o /tmp/pkg.apk
+              rm -rf /tmp/pkgx && mkdir -p /tmp/pkgx && tar -xzf /tmp/pkg.apk -C /tmp/pkgx
+              find /tmp/pkgx -name '*.so*' | while read -r f; do
+                b=$(basename "$f")
+                if [ -L "$f" ]; then
+                  # apks ship SONAME symlinks (e.g. /lib/libssl.so.3 ->
+                  # ../../lib/libssl.so.3) whose targets are only valid in the
+                  # full /usr/lib tree; copy the resolved real file instead.
+                  real=$(readlink -f "$f")
+                  if [ -f "$real" ]; then cp "$real" "/tmp/rt/bin/$b"; fi
+                else
+                  cp "$f" "/tmp/rt/bin/$b"
+                  son=$(readelf -d "$f" 2>/dev/null | awk -F'[][]' '/SONAME/ {print $2}')
+                  if [ -n "$son" ] && [ ! -e "/tmp/rt/bin/$son" ]; then
+                    ln -sf "$b" "/tmp/rt/bin/$son"
+                  fi
+                fi
+              done
+            done
+          }
+          # git main binary — only pcre2 + zlib are needed for local ops
+          # (log/status/diff/commit). Helpers (git-remote-https etc.) are
+          # omitted: they would bloat the runtime 136× via zip dereferencing
+          # symlinks (see RuntimeInstaller.java:88 ZipInputStream) and aren't
+          # needed for viewing history. Re-add with proper dedup if push/pull
+          # is required later.
+          curl -fsSL "$(apkurl git)" -o /tmp/git.apk
+          rm -rf /tmp/gitx && mkdir -p /tmp/gitx && tar -xzf /tmp/git.apk -C /tmp/gitx
+          cp /tmp/gitx/usr/bin/git /tmp/rt/bin/git
+          chmod +x /tmp/rt/bin/git
+          apkso zlib pcre2
+          # CA bundle (kept for future https support)
+          curl -fsSL "$(apkurl ca-certificates)" -o /tmp/ca.apk
+          rm -rf /tmp/cax && mkdir -p /tmp/cax && tar -xzf /tmp/ca.apk -C /tmp/cax
+          cp /tmp/cax/etc/ssl/certs/ca-certificates.crt /tmp/rt/bin/ca-certificates.crt 2>/dev/null || true
+
           (cd /tmp/rt && zip -qr "$GITHUB_WORKSPACE/android/app/src/main/assets/runtime-arm64.zip" .)
           unzip -l android/app/src/main/assets/runtime-arm64.zip
 
@@ -81,10 +144,14 @@ jobs:
           mkdir -p android/app/src/main/assets/web
           cp -r pwa/* android/app/src/main/assets/web/
 
-      - name: Build debug APK
+      - name: Unit-test and build debug APK
+        env:
+          # The bundled git + musl libs make the assets zip much larger, so
+          # give Gradle enough heap or compressDebugAssets OOMs.
+          GRADLE_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=512m"
         run: |
           cd android
-          gradle assembleDebug --stacktrace
+          gradle testDebugUnitTest assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -107,3 +174,64 @@ jobs:
       - name: Run bridge tests
         working-directory: server
         run: python -m pytest tests/ -v
+
+  pwa-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Syntax-check and unit-test the PWA
+        run: |
+          for f in pwa/js/*.js pwa/sw.js; do node --check "$f"; done
+          node --test pwa/tests/
+
+  e2e-smoke:
+    # Real daemon + pinned engine + PWA in headless Chrome at phone size.
+    # Catches what unit tests cannot: an engine API change, a route the UI
+    # calls but the daemon lacks, console errors, layout overflow.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build daemon and fetch the pinned engine
+        run: |
+          (cd daemon && go build -o /tmp/openforge-daemon .)
+          mkdir -p /tmp/oc
+          curl -fsSL https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-x64.tar.gz | tar -xz -C /tmp/oc
+          BIN=$(find /tmp/oc -type f -name opencode | head -1)
+          test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }
+          echo "OPENCODE_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Smoke-test daemon, engine and UI
+        run: |
+          node e2e/smoke.mjs --daemon /tmp/openforge-daemon --opencode "$OPENCODE_BIN" \
+            --chrome "$(command -v google-chrome || command -v chromium)" --shots /tmp/shots
+
+      - name: Chat and tool-approval round-trip (free model)
+        # Uses opencode's free default model over the network, which can be
+        # slow or rate-limited, so it reports but never fails the build.
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          node e2e/smoke.mjs --chat --daemon /tmp/openforge-daemon --opencode "$OPENCODE_BIN" \
+            --chrome "$(command -v google-chrome || command -v chromium)" --shots /tmp/shots/chat
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: /tmp/shots
+          if-no-files-found: ignore

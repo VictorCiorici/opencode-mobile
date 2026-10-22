@@ -13,6 +13,8 @@ $sevenzip = "C:\Program Files\7-Zip\7z.exe"
 $adb      = "C:\Unity_Android_SDK\platform-tools\adb.exe"
 $sdk      = "C:\Unity_Android_SDK"
 $root     = $PSScriptRoot
+# Keep in sync with OPENCODE_VERSION in .github/workflows/build-apk.yml.
+$opencodeVersion = "v1.19.3"
 $android  = Join-Path $root "android"
 $daemon   = Join-Path $root "daemon"
 
@@ -51,7 +53,7 @@ Write-Host "`n==> Downloading opencode engine (linux/arm64, musl)" -ForegroundCo
 # which Android's app seccomp policy SIGSYS-kills (RET_KILL outranks any
 # ERRNO shim, so glibc builds cannot run at all).
 $ocTar = Join-Path $tmp "oc.tar.gz"
-curl.exe -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64-musl.tar.gz -o $ocTar
+curl.exe -fsSL https://github.com/anomalyco/opencode/releases/download/$opencodeVersion/opencode-linux-arm64-musl.tar.gz -o $ocTar
 $ocDir = Join-Path $tmp "oc"
 Remove-Item -Recurse -Force $ocDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $ocDir | Out-Null
