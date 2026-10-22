@@ -439,9 +439,9 @@ func TestAuthMiddlewareTokenEnforcement(t *testing.T) {
 	if w := do(handler, "GET", "/api/health", "", nil); w.Code != 200 {
 		t.Fatal("health should stay open")
 	}
-	// Intended-public endpoints must NOT require a token.
-	if w := do(handler, "GET", "/projects", "", nil); w.Code != 200 {
-		t.Fatalf("public /projects should be open, got %d", w.Code)
+	// Reads are protected too: project paths are not for other local apps.
+	if w := do(handler, "GET", "/projects", "", nil); w.Code != 401 {
+		t.Fatalf("GET /projects without token: got %d, want 401", w.Code)
 	}
 	// A path under an API prefix is protected and must reject requests without a token.
 	if w := do(handler, "GET", "/api/secret", "", nil); w.Code != 401 {
@@ -450,8 +450,9 @@ func TestAuthMiddlewareTokenEnforcement(t *testing.T) {
 	if w := do(handler, "GET", "/api/secret", "", map[string]string{"Authorization": "Bearer secret123"}); w.Code != 200 {
 		t.Fatalf("header token rejected: %d", w.Code)
 	}
-	if w := do(handler, "GET", "/api/secret?token=secret123", "", nil); w.Code != 200 {
-		t.Fatal("query token rejected")
+	// ?token= is only for EventSource on the /oc/ proxy.
+	if w := do(handler, "GET", "/api/secret?token=secret123", "", nil); w.Code != 401 {
+		t.Fatalf("query token outside /oc/ accepted: %d", w.Code)
 	}
 }
 

@@ -259,39 +259,24 @@ func hostGuardMiddleware(next http.Handler) http.Handler {
 
 var apiPrefixes = []string{"/api/", "/git/", "/fs/", "/oc/", "/projects/", "/terminal/"}
 
-func isAPIPath(p string) bool {
-	// Paths that are explicitly public (no bearer token required). The earlier
-	// implementation checked these AFTER the apiPrefixes loop, so any path
-	// starting with /api/ (etc.) never reached the open list and wrongly
-	// demanded a token. Check the explicit open set first.
-	openExact := map[string]bool{
-		"/api/health":             true,
-		"/health":                 true,
-		"/api/auth/status":        true,
-		"/api/auth/token":         true,
-		"/api/favorites":          true,
-		"/api/settings/workspace": true,
-		"/api/models":             true,
-		"/projects":               true,
-		"/browse":                 true,
-		"/api/browse":             true,
-		"/api/projects":           true,
-		"/api/projects/import":    true,
-		"/api/projects/clone":     true,
-		"/git/config":             true,
-		"/api/git/config":         true,
-	}
-	if openExact[p] {
+// publicPaths stay open so the Android shell and clients can probe liveness
+// (and learn that a token is needed) before they hold one.
+var publicPaths = map[string]bool{"/api/health": true, "/health": true}
+
+// legacyAPIPaths are API routes that predate the prefixed layout.
+var legacyAPIPaths = map[string]bool{"/projects": true, "/browse": true}
+
+// needsAuth reports whether a request must present the bearer token. Every
+// API route requires it, reads included: folder listings, project paths and
+// credential status are not for other apps on the device. Only health checks
+// and the static UI are public, matching the Python bridge.
+func needsAuth(method, p string) bool {
+	if publicPaths[p] {
 		return false
 	}
-	// Public path prefixes.
-	openPrefix := []string{"/api/models/"}
-	for _, pref := range openPrefix {
-		if strings.HasPrefix(p, pref) {
-			return false
-		}
+	if legacyAPIPaths[p] {
+		return true
 	}
-	// Everything else under these prefixes requires a bearer token.
 	for _, pref := range apiPrefixes {
 		if strings.HasPrefix(p, pref) {
 			return true
@@ -300,12 +285,18 @@ func isAPIPath(p string) bool {
 	return false
 }
 
+// bearerFromRequest returns the request's token. ?token= is honoured only for
+// GETs on the /oc/ proxy, because EventSource cannot send headers; everywhere
+// else tokens stay out of URLs and logs.
 func bearerFromRequest(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	}
-	return r.URL.Query().Get("token")
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/oc/") {
+		return r.URL.Query().Get("token")
+	}
+	return ""
 }
 
 func checkToken(provided string) bool {
@@ -318,38 +309,6 @@ func checkToken(provided string) bool {
 	copy(a, provided)
 	copy(b, cfg.Token)
 	return subtle.ConstantTimeCompare(a, b) == 1 && len(provided) == len(cfg.Token)
-}
-
-// alwaysProtected lists state-changing or network-probing endpoints that sit
-// under otherwise-public prefixes and must carry the bearer token regardless
-// of HTTP method.
-var alwaysProtected = map[string]bool{
-	"/api/auth/token":            true,
-	"/api/models/scan-lan":       true,
-	"/api/models/probe-host":     true,
-	"/api/models/register-local": true,
-}
-
-// needsAuth reports whether a request must present the bearer token. Public
-// paths are only public for read-only methods; anything that mutates state
-// (project create/import/clone, workspace, favorites, model config, ...)
-// requires the token even if the same path is open for GET.
-func needsAuth(method, p string) bool {
-	if alwaysProtected[p] {
-		return true
-	}
-	if isAPIPath(p) {
-		return true
-	}
-	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
-		return false
-	}
-	// Non-read request on a path isAPIPath considers public.
-	switch p {
-	case "/api/health", "/health":
-		return false
-	}
-	return strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/projects") || strings.HasPrefix(p, "/git/")
 }
 
 func authMiddleware(next http.Handler) http.Handler {
@@ -476,6 +435,14 @@ type Instance struct {
 	LastUsed time.Time
 	Started  time.Time
 	exited   chan struct{} // closed once the process has been reaped
+}
+
+// kill stops the engine and everything it spawned. An engine that has
+// already been reaped is skipped: its PID may now belong to another process.
+func (i *Instance) kill() {
+	if i.Cmd != nil && !i.hasExited() {
+		killTree(i.Cmd)
+	}
 }
 
 func (i *Instance) hasExited() bool {
@@ -616,6 +583,7 @@ func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
 	if logf != nil {
 		cmd.Stdout, cmd.Stderr = logf, logf
 	}
+	startInOwnGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		if logf != nil {
 			logf.Close()
@@ -662,7 +630,7 @@ func (m *Manager) waitHealthy(inst *Instance) *Instance {
 		delete(m.instances, inst.PID)
 	}
 	m.mu.Unlock()
-	inst.Cmd.Process.Kill()
+	inst.kill()
 	return inst
 }
 
@@ -683,7 +651,7 @@ func (m *Manager) acquire(pid string, dirFn func() (string, error)) (*Instance, 
 				m.mu.Unlock()
 				return m.waitHealthy(inst), nil
 			}
-			inst.Cmd.Process.Kill()
+			inst.kill()
 		}
 		delete(m.instances, pid)
 	}
@@ -723,7 +691,7 @@ func (m *Manager) Stop(pid string) bool {
 	delete(m.instances, pid)
 	m.mu.Unlock()
 	if inst != nil && inst.Cmd != nil && inst.Cmd.Process != nil {
-		inst.Cmd.Process.Kill()
+		inst.kill()
 		return true
 	}
 	return false
@@ -741,7 +709,7 @@ func (m *Manager) StopAll() {
 	m.mu.Unlock()
 	for _, inst := range instances {
 		if inst.Cmd != nil && inst.Cmd.Process != nil {
-			inst.Cmd.Process.Kill()
+			inst.kill()
 		}
 	}
 }
@@ -759,7 +727,7 @@ func (m *Manager) reapLoop() {
 		m.mu.Unlock()
 		for _, inst := range stale {
 			if inst.Cmd != nil && inst.Cmd.Process != nil {
-				inst.Cmd.Process.Kill()
+				inst.kill()
 			}
 		}
 	}

@@ -55,7 +55,7 @@ cd opencode-mobile
 Open Chrome at `http://127.0.0.1:8787/ui`, then *Add to Home Screen* to install as a full-screen PWA.
 
 ## 🔐 Security model
-* The Android daemon generates a random bearer token per install and hands it to its own WebView through a JS interface — only while the WebView shows the bundled UI origin or the daemon's own loopback port (external links open in the system browser). Every mutating API call (headers, or `?token=` for SSE) must present it.
+* The Android daemon generates a random bearer token per install and hands it to its own WebView through a JS interface — only while the WebView shows the bundled UI origin or the daemon's own loopback port (external links open in the system browser). Every API call, reads included, must present it as a `Bearer` header; `?token=` is accepted only for the `/oc/` event stream, since EventSource cannot send headers. Only `/api/health` and the static UI are public.
 * CORS is limited to the bundled UI origin and loopback, and while bound to loopback both backends reject requests whose `Host` is not a loopback name (DNS-rebinding protection). Extra names can be allowed on the Python bridge with `OCMB_ALLOWED_HOSTS`.
 * App data is excluded from Android backups (`allowBackup=false`) because it holds API keys.
 * Termux/desktop flow: set `OCMB_TOKEN` to require a token there too (otherwise auth is disabled, which is fine while bound to loopback only).

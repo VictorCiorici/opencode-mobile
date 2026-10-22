@@ -57,36 +57,31 @@ func TestNeedsAuth(t *testing.T) {
 	}{
 		{"GET", "/api/health", false},
 		{"GET", "/health", false},
-		{"GET", "/api/auth/status", false},
-		{"GET", "/api/projects", false},
-		{"GET", "/projects", false},
-		{"GET", "/api/models/global", false},
-		{"GET", "/api/favorites", false},
-		{"GET", "/api/settings/workspace", false},
+		{"POST", "/api/health", false},
+		// Static UI stays public.
+		{"GET", "/ui/", false},
+		{"GET", "/", false},
+		{"GET", "/index.html", false},
+		// Every API read requires the token, like the Python bridge.
+		{"GET", "/api/auth/status", true},
+		{"GET", "/api/browse", true},
+		{"GET", "/browse", true},
+		{"GET", "/api/projects", true},
+		{"GET", "/projects", true},
+		{"GET", "/api/models/global", true},
+		{"GET", "/api/favorites", true},
+		{"GET", "/api/settings/workspace", true},
+		{"GET", "/git/config", true},
 		{"GET", "/api/fs/p/read", true},
 		{"GET", "/fs/p/read", true},
 		{"GET", "/git/p/status", true},
 		{"POST", "/terminal/p/exec", true},
 		{"GET", "/oc/p/session", true},
-		// Public for GET but mutating methods must carry a token.
 		{"POST", "/api/projects", true},
-		{"POST", "/api/projects/import", true},
 		{"POST", "/api/projects/clone", true},
-		{"POST", "/api/favorites", true},
-		{"POST", "/api/settings/workspace", true},
-		{"POST", "/api/models/someproject", true},
-		{"DELETE", "/api/models/someproject", true},
-		{"POST", "/git/config", true},
-		// Always protected regardless of method.
 		{"GET", "/api/auth/token", true},
-		{"POST", "/api/auth/token", true},
 		{"GET", "/api/models/scan-lan", true},
-		{"POST", "/api/models/probe-host", true},
 		{"POST", "/api/models/register-local", true},
-		// Health stays open for any method; non-API (static) paths are open.
-		{"POST", "/api/health", false},
-		{"GET", "/ui/", false},
-		{"GET", "/", false},
 	}
 	for _, c := range cases {
 		if got := needsAuth(c.method, c.path); got != c.want {
@@ -118,9 +113,15 @@ func TestCheckTokenAndBearer(t *testing.T) {
 		t.Error("exact long token rejected")
 	}
 
-	r := httptest.NewRequest("GET", "/x?token=qq", nil)
+	if bearerFromRequest(httptest.NewRequest("GET", "/api/x?token=qq", nil)) != "" {
+		t.Error("query token honoured outside /oc/")
+	}
+	if bearerFromRequest(httptest.NewRequest("POST", "/oc/p/event?token=qq", nil)) != "" {
+		t.Error("query token honoured for a non-GET")
+	}
+	r := httptest.NewRequest("GET", "/oc/p/event?token=qq", nil)
 	if bearerFromRequest(r) != "qq" {
-		t.Error("query token not read")
+		t.Error("query token not read for SSE")
 	}
 	r.Header.Set("Authorization", "Bearer  hdr ")
 	if bearerFromRequest(r) != "hdr" {
@@ -152,10 +153,13 @@ func TestAuthMiddlewareProtectsMutationsAndFullMux(t *testing.T) {
 	if w := do(h, "GET", "/api/models/scan-lan", "", nil); w.Code != 401 {
 		t.Fatalf("scan-lan must be protected: %d", w.Code)
 	}
-	if w := do(h, "GET", "/api/favorites", "", nil); w.Code != 200 {
-		t.Fatalf("favorites GET should stay open: %d", w.Code)
+	if w := do(h, "GET", "/api/favorites", "", nil); w.Code != 401 {
+		t.Fatalf("unauthenticated favorites read: %d", w.Code)
 	}
 	hdr := map[string]string{"Authorization": "Bearer tok"}
+	if w := do(h, "GET", "/api/favorites", "", hdr); w.Code != 200 {
+		t.Fatalf("authenticated favorites read: %d", w.Code)
+	}
 	if w := do(h, "POST", "/api/projects", `{"name":"x","git_init":false}`, hdr); w.Code != 200 {
 		t.Fatalf("authenticated create failed: %d %s", w.Code, w.Body.String())
 	}
