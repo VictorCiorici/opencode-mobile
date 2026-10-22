@@ -44,7 +44,7 @@ Both backends (Go daemon and Python bridge) implement the **same HTTP API contra
 1. Download the latest APK from [GitHub Actions artifacts](https://github.com/VictorCiorici/opencode-mobile/actions).
 2. Install it (Android 7.0+). Updates install in place — the debug keystore is committed so signatures stay stable.
 3. On first launch grant notifications and storage access when prompted.
-4. The APK bundles the OpenCode engine (musl build, pinned to the on-device-verified release — see `OPENCODE_VERSION` in `.github/workflows/build-apk.yml`). OpenForge speaks the opencode **1.x** API; 2.x engines serve a different API and are reported as incompatible instead of failing obscurely.
+4. The APK bundles the OpenCode engine (musl build, pinned by `OPENCODE_VERSION` in `.github/workflows/build-apk.yml`). OpenForge speaks the opencode **1.x** API, which is opencode's main release line (GitHub releases, npm `opencode-ai`). The separate 2.x package (npm `@opencode/cli`) has a different, still experimental API; it is reported as incompatible instead of failing obscurely. On a desktop with 2.x installed globally, point the daemon at a 1.x binary with `-opencode`.
 
 ### Option B — Browser / Termux / proot (PWA)
 ```bash
@@ -98,7 +98,7 @@ cd android && gradle testDebugUnitTest
 # End-to-end smoke test: real daemon + opencode 1.x engine + UI in headless
 # Chrome at phone size. No model is called, so no API keys are needed.
 (cd daemon && go build -o /tmp/openforge-daemon .)
-node e2e/smoke.mjs --daemon /tmp/openforge-daemon --opencode <opencode v1.18.25> --chrome <chrome>
+node e2e/smoke.mjs --daemon /tmp/openforge-daemon --opencode <opencode v1.19.x> --chrome <chrome>
 ```
 CI builds the ARM64 daemon, runs all suites including the smoke test, and uploads the APK on every push and pull request.
 

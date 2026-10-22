@@ -6,9 +6,12 @@ on:
   pull_request:
 
 env:
-  # Engine pinned to the release verified on-device. "latest" drifts: newer
-  # lines (opencode 2.x) serve a different, password-protected API under /api.
-  OPENCODE_VERSION: v1.18.25
+  # Engine pinned so builds are reproducible. Stay on the 1.x line (GitHub
+  # releases / npm "opencode-ai"): the separate 2.x package (npm
+  # "@opencode/cli") has a different, still experimental API under /api.
+  # v1.18.25 is the last release verified on a device; v1.19.3 exposes the
+  # identical route set and passes e2e/smoke.mjs and a live chat round-trip.
+  OPENCODE_VERSION: v1.19.3
 
 jobs:
   build:

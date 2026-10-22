@@ -14,7 +14,7 @@ $adb      = "C:\Unity_Android_SDK\platform-tools\adb.exe"
 $sdk      = "C:\Unity_Android_SDK"
 $root     = $PSScriptRoot
 # Keep in sync with OPENCODE_VERSION in .github/workflows/build-apk.yml.
-$opencodeVersion = "v1.18.25"
+$opencodeVersion = "v1.19.3"
 $android  = Join-Path $root "android"
 $daemon   = Join-Path $root "daemon"
 
