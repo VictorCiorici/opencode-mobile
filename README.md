@@ -94,8 +94,13 @@ node --test pwa/tests/
 
 # Android JVM unit tests
 cd android && gradle testDebugUnitTest
+
+# End-to-end smoke test: real daemon + opencode 1.x engine + UI in headless
+# Chrome at phone size. No model is called, so no API keys are needed.
+(cd daemon && go build -o /tmp/openforge-daemon .)
+node e2e/smoke.mjs --daemon /tmp/openforge-daemon --opencode <opencode v1.18.25> --chrome <chrome>
 ```
-CI builds the ARM64 daemon, runs all suites, and uploads the APK on every push and pull request.
+CI builds the ARM64 daemon, runs all suites including the smoke test, and uploads the APK on every push and pull request.
 
 ## 📜 License
 

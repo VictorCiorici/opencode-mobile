@@ -11,6 +11,7 @@ import (
 // also stop the language servers and shells it spawns.
 func startInOwnGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	dieWithParent(cmd.SysProcAttr)
 }
 
 // killTree kills cmd's process group, falling back to the process alone.

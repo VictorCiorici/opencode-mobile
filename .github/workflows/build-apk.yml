@@ -185,3 +185,41 @@ jobs:
         run: |
           for f in pwa/js/*.js pwa/sw.js; do node --check "$f"; done
           node --test pwa/tests/
+
+  e2e-smoke:
+    # Real daemon + pinned engine + PWA in headless Chrome at phone size.
+    # Catches what unit tests cannot: an engine API change, a route the UI
+    # calls but the daemon lacks, console errors, layout overflow.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build daemon and fetch the pinned engine
+        run: |
+          (cd daemon && go build -o /tmp/openforge-daemon .)
+          mkdir -p /tmp/oc
+          curl -fsSL https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-x64.tar.gz | tar -xz -C /tmp/oc
+          BIN=$(find /tmp/oc -type f -name opencode | head -1)
+          test -n "$BIN" || { echo "opencode binary not found in archive"; exit 1; }
+          echo "OPENCODE_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Smoke-test daemon, engine and UI
+        run: |
+          node e2e/smoke.mjs --daemon /tmp/openforge-daemon --opencode "$OPENCODE_BIN" \
+            --chrome "$(command -v google-chrome || command -v chromium)" --shots /tmp/shots
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: /tmp/shots
+          if-no-files-found: ignore

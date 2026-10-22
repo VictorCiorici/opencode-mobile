@@ -562,6 +562,30 @@ func engineCommand(bin string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// allocPort returns the next engine port that nothing is listening on. An
+// engine left over from a hard-killed daemon may still hold a port, and its
+// health check would pass for the wrong project. Callers must hold m.mu.
+func (m *Manager) allocPort() int {
+	for i := 0; i < 200; i++ {
+		port := m.nextPort
+		m.nextPort++
+		if portFree(port) {
+			return port
+		}
+		log.Printf("engine port %d is busy, skipping", port)
+	}
+	return m.nextPort
+}
+
+func portFree(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
+}
+
 // spawnLocked starts `opencode serve` for pid rooted at dir. Callers must
 // hold m.mu and unlock it themselves after registering the instance.
 func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
@@ -569,8 +593,7 @@ func (m *Manager) spawnLocked(pid, dir string) (*Instance, error) {
 	if opencodeBin == "" {
 		return nil, ErrNoEngine
 	}
-	port := m.nextPort
-	m.nextPort++
+	port := m.allocPort()
 	cmd := engineCommand(opencodeBin, "serve", "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
 	cmd.Dir = dir
 	// Keep the engine's own output: without it a failed start is invisible.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -14,9 +15,12 @@ import (
 // a "child" and prints its PID, the child just sleeps.
 func TestMain(m *testing.M) {
 	switch os.Getenv("OF_PROC_HELPER") {
-	case "parent":
+	case "parent", "engine-parent":
 		c := exec.Command(os.Args[0])
 		c.Env = append(os.Environ(), "OF_PROC_HELPER=child")
+		if os.Getenv("OF_PROC_HELPER") == "engine-parent" {
+			startInOwnGroup(c) // spawned the way the daemon spawns engines
+		}
 		if err := c.Start(); err != nil {
 			os.Exit(2)
 		}
@@ -65,4 +69,20 @@ func TestKillTreeStopsGrandchildren(t *testing.T) {
 	}
 	// Killing an already-reaped instance is a no-op, not a stray signal.
 	inst.kill()
+}
+
+func TestAllocPortSkipsBusyPorts(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	busy := ln.Addr().(*net.TCPAddr).Port
+	m := &Manager{nextPort: busy}
+	if got := m.allocPort(); got == busy {
+		t.Fatalf("allocPort returned busy port %d", busy)
+	}
+	if m.nextPort <= busy {
+		t.Fatalf("nextPort did not advance: %d", m.nextPort)
+	}
 }
